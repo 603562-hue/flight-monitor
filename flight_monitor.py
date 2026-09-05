@@ -11,15 +11,32 @@ from fast_flights import (
 )
 
 
+# ============================================================
+# TELEGRAM
+# ============================================================
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 
 # ============================================================
-# НАСТРОЙКИ
+# ОСНОВНЫЕ НАСТРОЙКИ
 # ============================================================
 
-PRICE_LIMIT = 60000
+# Максимальная цена билета
+PRICE_LIMIT_RUB = 70000
+
+# Ориентировочный курс для отображения цены в долларах.
+# Сам поиск всё равно выполняется в RUB.
+RUB_PER_USD = 86.59
+
+# Рассчитанный долларовый лимит
+PRICE_LIMIT_USD = PRICE_LIMIT_RUB / RUB_PER_USD
+
+
+# ============================================================
+# ДАТЫ
+# ============================================================
 
 OUTBOUND_DATES = [
     "2026-12-28",
@@ -36,11 +53,21 @@ RETURN_DATES = [
     "2027-01-25",
 ]
 
+
+# ============================================================
+# АЭРОПОРТЫ МОСКВЫ
+# ============================================================
+
 MOSCOW_AIRPORTS = [
     "SVO",
     "DME",
     "VKO",
 ]
+
+
+# ============================================================
+# ПУНКТЫ НАЗНАЧЕНИЯ
+# ============================================================
 
 DESTINATIONS = {
     "BKK": "Bangkok",
@@ -49,7 +76,7 @@ DESTINATIONS = {
 
 
 # ============================================================
-# АВИАКОМПАНИИ, КОТОРЫЕ МЫ ХОТИМ ОТСЛЕЖИВАТЬ
+# АВИАКОМПАНИИ
 # ============================================================
 
 TARGET_AIRLINES = {
@@ -65,6 +92,10 @@ TARGET_AIRLINES = {
     "EK": "Emirates",
 }
 
+
+# ============================================================
+# ФАЙЛ СОСТОЯНИЯ
+# ============================================================
 
 STATE_FILE = Path("flight_state.json")
 
@@ -132,7 +163,7 @@ def save_state(state):
 
 
 # ============================================================
-# ПОИСК GOOGLE FLIGHTS
+# ПОИСК
 # ============================================================
 
 def search_flights(
@@ -178,7 +209,7 @@ def search_flights(
 
 
 # ============================================================
-# ДАННЫЕ РЕЙСА
+# ЦЕНА
 # ============================================================
 
 def get_price(flight):
@@ -199,6 +230,10 @@ def get_price(flight):
         return None
 
 
+# ============================================================
+# АВИАКОМПАНИИ
+# ============================================================
+
 def get_airlines(flight):
 
     value = getattr(
@@ -216,6 +251,90 @@ def get_airlines(flight):
 
     return str(value)
 
+
+def identify_target_airlines(
+    airlines_text
+):
+
+    text = airlines_text.lower()
+
+    aliases = {
+
+        "G9": [
+            "air arabia",
+            "g9",
+        ],
+
+        "CA": [
+            "air china",
+            "ca",
+        ],
+
+        "WY": [
+            "oman air",
+            "wy",
+        ],
+
+        "EY": [
+            "etihad",
+            "etihad airways",
+            "ey",
+        ],
+
+        "TK": [
+            "turkish airlines",
+            "turkish",
+            "tk",
+        ],
+
+        "FZ": [
+            "flydubai",
+            "fly dubai",
+            "fz",
+        ],
+
+        "CZ": [
+            "china southern",
+            "cz",
+        ],
+
+        "MU": [
+            "china eastern",
+            "mu",
+        ],
+
+        "QR": [
+            "qatar airways",
+            "qatar",
+            "qr",
+        ],
+
+        "EK": [
+            "emirates",
+            "ek",
+        ],
+    }
+
+    found = []
+
+    for code, names in aliases.items():
+
+        for name in names:
+
+            if name in text:
+
+                found.append(
+                    TARGET_AIRLINES[code]
+                )
+
+                break
+
+    return found
+
+
+# ============================================================
+# СЕГМЕНТЫ
+# ============================================================
 
 def get_segments(flight):
 
@@ -260,108 +379,14 @@ def get_segments(flight):
         )
 
         result.append({
-            "airline": str(
-                airline
-            ),
-            "number": str(
-                number
-            ),
-            "departure": str(
-                departure
-            ),
-            "arrival": str(
-                arrival
-            ),
-            "duration": str(
-                duration
-            ),
+            "airline": str(airline),
+            "number": str(number),
+            "departure": str(departure),
+            "arrival": str(arrival),
+            "duration": str(duration),
         })
 
     return result
-
-
-# ============================================================
-# ОПРЕДЕЛЕНИЕ АВИАКОМПАНИИ
-# ============================================================
-
-def identify_target_airlines(
-    airlines_text
-):
-
-    text = airlines_text.lower()
-
-    found = []
-
-    aliases = {
-
-        "G9": [
-            "air arabia",
-            "g9",
-        ],
-
-        "CA": [
-            "air china",
-            "ca",
-        ],
-
-        "WY": [
-            "oman air",
-            "wy",
-        ],
-
-        "EY": [
-            "etihad",
-            "etihad airways",
-            "ey",
-        ],
-
-        "TK": [
-            "turkish airlines",
-            "turkish",
-            "tk",
-        ],
-
-        "FZ": [
-            "flydubai",
-            "flydubai",
-            "fz",
-        ],
-
-        "CZ": [
-            "china southern",
-            "cz",
-        ],
-
-        "MU": [
-            "china eastern",
-            "mu",
-        ],
-
-        "QR": [
-            "qatar airways",
-            "qatar",
-            "qr",
-        ],
-
-        "EK": [
-            "emirates",
-            "ek",
-        ],
-    }
-
-    for code, names in aliases.items():
-
-        for name in names:
-
-            if name in text:
-
-                found.append(
-                    TARGET_AIRLINES[code]
-                )
-
-                break
-
-    return found
 
 
 # ============================================================
@@ -383,7 +408,9 @@ def add_result(
     if price is None:
         return
 
-    if price > PRICE_LIMIT:
+    # Главный фильтр:
+    # всё дороже 70 000 ₽ игнорируем
+    if price > PRICE_LIMIT_RUB:
         return
 
     airlines = get_airlines(
@@ -491,7 +518,7 @@ def search_general(results):
 
 
 # ============================================================
-# ПОИСК КОНКРЕТНЫХ АВИАКОМПАНИЙ
+# СПЕЦИАЛЬНЫЙ ПОИСК АВИАКОМПАНИЙ
 # ============================================================
 
 def search_target_airlines(results):
@@ -511,8 +538,7 @@ def search_target_airlines(results):
     for code, airline_name in TARGET_AIRLINES.items():
 
         print(
-            f"\n>>> {airline_name} "
-            f"({code})"
+            f"\n>>> {airline_name} ({code})"
         )
 
         for outbound in OUTBOUND_DATES:
@@ -520,12 +546,6 @@ def search_target_airlines(results):
             for return_date in RETURN_DATES:
 
                 for airport in MOSCOW_AIRPORTS:
-
-                    # Для специальных поисков
-                    # проверяем BKK.
-                    #
-                    # Общий поиск выше уже проверяет
-                    # и BKK, и UTP.
 
                     destination = "BKK"
 
@@ -573,7 +593,7 @@ def search_target_airlines(results):
 
 
 # ============================================================
-# УДАЛЕНИЕ ДУБЛИКАТОВ
+# ДУБЛИКАТЫ
 # ============================================================
 
 def remove_duplicates(results):
@@ -598,9 +618,7 @@ def remove_duplicates(results):
 
         seen.add(key)
 
-        unique.append(
-            item
-        )
+        unique.append(item)
 
     return unique
 
@@ -621,10 +639,10 @@ def make_key(item):
 
 
 # ============================================================
-# КРАСИВЫЙ ВЫВОД
+# ФОРМАТИРОВАНИЕ
 # ============================================================
 
-def format_price(price):
+def format_rub(price):
 
     return (
         f"{price:,}"
@@ -632,6 +650,20 @@ def format_price(price):
         + " ₽"
     )
 
+
+def format_usd(price):
+
+    usd = price / RUB_PER_USD
+
+    return (
+        f"${usd:,.0f}"
+        .replace(",", " ")
+    )
+
+
+# ============================================================
+# ТЕКСТ РЕЙСА
+# ============================================================
 
 def build_flight_text(item):
 
@@ -660,6 +692,7 @@ def build_flight_text(item):
         )
 
         if number:
+
             text += (
                 f" {number}"
             )
@@ -673,15 +706,28 @@ def build_flight_text(item):
 
 
 # ============================================================
-# TELEGRAM СООБЩЕНИЕ
+# TELEGRAM
 # ============================================================
 
 def build_message(item):
 
+    price_rub = format_rub(
+        item["price"]
+    )
+
+    price_usd = format_usd(
+        item["price"]
+    )
+
+    limit_usd = format_usd(
+        PRICE_LIMIT_RUB
+    )
+
     message = (
         "🚨 ДЕШЁВЫЙ БИЛЕТ!\n\n"
 
-        f"💰 {format_price(item['price'])}\n"
+        f"💰 {price_rub} "
+        f"({price_usd})\n"
 
         f"📅 {item['outbound']} → "
         f"{item['return']}\n"
@@ -712,16 +758,19 @@ def build_message(item):
     )
 
     message += (
-        "\nУсловие: ≤ 60 000 ₽\n"
-        "Google Flights / "
-        "fast-flights"
+        "\n🎯 Лимит: "
+        f"{format_rub(PRICE_LIMIT_RUB)} "
+        f"(≈ {limit_usd})\n"
+
+        "Источник: Google Flights / "
+        "fast-flights."
     )
 
     return message
 
 
 # ============================================================
-# ОСНОВНОЙ ЦИКЛ
+# ОСНОВНАЯ ПРОГРАММА
 # ============================================================
 
 def main():
@@ -735,41 +784,36 @@ def main():
     )
 
     print(
-        "Price limit:",
-        PRICE_LIMIT,
-        "RUB"
+        f"Price limit: "
+        f"{PRICE_LIMIT_RUB} RUB"
     )
 
     print(
-        "Airlines monitored:"
+        f"Approx USD limit: "
+        f"${PRICE_LIMIT_USD:.0f}"
     )
 
-    for code, name in TARGET_AIRLINES.items():
-
-        print(
-            f"  {code} - {name}"
-        )
+    print(
+        f"RUB/USD rate: "
+        f"{RUB_PER_USD}"
+    )
 
     print(
         "================================"
     )
-
 
     state = load_state()
 
     all_results = []
 
 
-    # 1. Общий поиск
-
+    # Общий поиск
     search_general(
         all_results
     )
 
 
-    # 2. Специальный поиск
-    # авиакомпаний
-
+    # Поиск целевых авиакомпаний
     search_target_airlines(
         all_results
     )
@@ -800,12 +844,12 @@ def main():
     )
 
 
-    # ========================================================
-    # ТОЛЬКО НОВЫЕ ИЛИ ПОДЕШЕВЕВШИЕ
-    # ========================================================
-
     notifications = 0
 
+
+    # ========================================================
+    # УВЕДОМЛЕНИЯ
+    # ========================================================
 
     for item in all_results:
 
@@ -823,7 +867,6 @@ def main():
 
 
         # Новый вариант
-
         if old_price is None:
 
             send_telegram(
@@ -840,7 +883,6 @@ def main():
 
 
         # Цена снизилась
-
         if new_price < old_price:
 
             difference = (
@@ -852,13 +894,16 @@ def main():
                 "📉 ЦЕНА УПАЛА!\n\n"
 
                 f"Было: "
-                f"{format_price(old_price)}\n"
+                f"{format_rub(old_price)} "
+                f"({format_usd(old_price)})\n"
 
                 f"Стало: "
-                f"{format_price(new_price)}\n"
+                f"{format_rub(new_price)} "
+                f"({format_usd(new_price)})\n"
 
                 f"Экономия: "
-                f"{format_price(difference)}\n\n"
+                f"{format_rub(difference)} "
+                f"({format_usd(difference)})\n\n"
             )
 
             message += (
@@ -876,20 +921,21 @@ def main():
             state[key] = new_price
 
 
-        # Цена не изменилась:
-        # ничего не отправляем
+        # Если цена не изменилась —
+        # ничего не отправляем.
 
-        # Цена выросла:
-        # тоже ничего не отправляем
+        # Если цена выросла —
+        # тоже ничего не отправляем.
 
 
+    # Сохраняем состояние
     save_state(
         state
     )
 
 
     print(
-        "Notifications:",
+        "Notifications sent:",
         notifications
     )
 
