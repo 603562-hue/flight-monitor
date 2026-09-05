@@ -24,7 +24,10 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
 
         page = browser.new_page(
@@ -33,62 +36,93 @@ def main():
         )
 
         print("Opening Air Arabia...")
-        page.goto(URL, wait_until="domcontentloaded", timeout=90000)
-        page.wait_for_timeout(5000)
+        page.goto(
+            URL,
+            wait_until="domcontentloaded",
+            timeout=90000,
+        )
 
-        print("URL:", page.url)
-        print("TITLE:", page.title())
+        page.wait_for_timeout(10000)
 
-        # Return / туда-обратно
-        return_option = page.get_by_text("Return", exact=True)
+        print("PAGE URL:", page.url)
+        print("PAGE TITLE:", page.title())
 
-        if return_option.count() > 0:
-            return_option.first.click()
-            print("Return selected")
-        else:
-            print("Return option not found")
+        messages = []
 
-        # Показываем доступные input'ы для диагностики
-        inputs = page.locator("input")
-        print("INPUT COUNT:", inputs.count())
+        frames = page.frames
 
-        for i in range(inputs.count()):
+        print("FRAME COUNT:", len(frames))
+
+        for frame_index, frame in enumerate(frames):
+            print("")
+            print("===== FRAME", frame_index, "=====")
+            print("FRAME URL:", frame.url)
+
             try:
-                element = inputs.nth(i)
-                print(
-                    "INPUT",
-                    i,
-                    "placeholder=",
-                    element.get_attribute("placeholder"),
-                    "aria-label=",
-                    element.get_attribute("aria-label"),
-                )
-            except Exception:
-                pass
+                inputs = frame.locator("input")
+                buttons = frame.locator("button")
 
-        # Показываем кнопки
-        buttons = page.locator("button")
-        print("BUTTON COUNT:", buttons.count())
+                input_count = inputs.count()
+                button_count = buttons.count()
 
-        for i in range(min(buttons.count(), 30)):
-            try:
-                print(
-                    "BUTTON",
-                    i,
-                    "TEXT=",
-                    buttons.nth(i).inner_text()
+                print("INPUT COUNT:", input_count)
+                print("BUTTON COUNT:", button_count)
+
+                messages.append(
+                    f"FRAME {frame_index}\n"
+                    f"URL: {frame.url[:180]}\n"
+                    f"INPUTS: {input_count}\n"
+                    f"BUTTONS: {button_count}"
                 )
-            except Exception:
-                pass
+
+                for i in range(min(input_count, 20)):
+                    element = inputs.nth(i)
+
+                    info = (
+                        f"INPUT {i}: "
+                        f"type={element.get_attribute('type')} | "
+                        f"name={element.get_attribute('name')} | "
+                        f"id={element.get_attribute('id')} | "
+                        f"placeholder={element.get_attribute('placeholder')} | "
+                        f"aria={element.get_attribute('aria-label')}"
+                    )
+
+                    print(info)
+                    messages.append(info)
+
+                for i in range(min(button_count, 20)):
+                    element = buttons.nth(i)
+
+                    try:
+                        text = element.inner_text().strip()
+                    except Exception:
+                        text = ""
+
+                    info = (
+                        f"BUTTON {i}: "
+                        f"text={text[:100]} | "
+                        f"aria={element.get_attribute('aria-label')} | "
+                        f"type={element.get_attribute('type')}"
+                    )
+
+                    print(info)
+                    messages.append(info)
+
+            except Exception as e:
+                print("FRAME ERROR:", str(e))
+                messages.append(
+                    f"FRAME {frame_index} ERROR: {str(e)[:200]}"
+                )
+
+        diagnostic = "\n".join(messages)
+
+        # Telegram has a 4096 character limit.
+        diagnostic = diagnostic[:3800]
 
         send_telegram(
             "✈️ FLIGHT MONITOR\n\n"
-            "Реальный тест Air Arabia запущен.\n\n"
-            "Браузер открыл форму бронирования.\n"
-            "Форма Return обработана.\n\n"
-            "Следующий результат будет содержать "
-            "точные элементы формы, которые видит "
-            "автоматический браузер."
+            "Диагностика формы Air Arabia.\n\n"
+            f"{diagnostic}"
         )
 
         browser.close()
