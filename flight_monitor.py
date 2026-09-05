@@ -2,102 +2,65 @@ import os
 import requests
 from playwright.sync_api import sync_playwright
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-URL = "https://www.airarabia.com/en/plan/reservation/book-flight"
+URL = "https://www.ozon.ru/travel/flight/moskva-mow/suvarnabhumi-bkk/"
 
-
-def send_telegram(message):
-    response = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-        },
-        timeout=30,
+def telegram(text):
+    requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        data={"chat_id": CHAT_ID, "text": text[:3900]},
+        timeout=30
     )
-    response.raise_for_status()
 
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    context = browser.new_context(locale="ru-RU")
+    page = context.new_page()
 
-def main():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+    seen = []
 
-        page = browser.new_page(
-            viewport={"width": 1440, "height": 1000},
-            locale="en-US",
-        )
+    def capture(request):
+        u = request.url
+        low = u.lower()
+        keys = ["api", "flight", "travel", "search", "graphql", "bff"]
+        if any(k in low for k in keys):
+            item = request.method + " " + u
+            if item not in seen:
+                seen.append(item)
 
-        print("Opening Air Arabia...")
-        page.goto(URL, wait_until="domcontentloaded", timeout=90000)
-        page.wait_for_timeout(15000)
+    page.on("request", capture)
 
-        print("TITLE:", page.title())
-        print("URL:", page.url)
+    page.goto(URL, wait_until="domcontentloaded", timeout=90000)
+    page.wait_for_timeout(15000)
 
-        # Получаем весь видимый текст страницы
-        text = page.locator("body").inner_text()
+    resources = page.evaluate(
+        "performance.getEntriesByType('resource').map(x => x.name)"
+    )
 
-        print("BODY TEXT LENGTH:", len(text))
-        print(text[:5000])
+    for u in resources:
+        low = u.lower()
+        if any(k in low for k in ["api", "flight", "travel", "search", "graphql", "bff"]):
+            item = "RESOURCE " + u
+            if item not in seen:
+                seen.append(item)
 
-        # Ищем элементы по тексту
-        checks = [
-            "One way",
-            "Return",
-            "Departure",
-            "Passengers",
-            "Economy class",
-            "Search & Book",
-        ]
+    text = page.locator("body").inner_text()
 
-        result = []
+    print("PAGE:", page.url)
+    print("TITLE:", page.title())
+    print("NETWORK:")
+    for x in seen:
+        print(x)
 
-        for item in checks:
-            found = item in text
-            line = f"{item}: {'FOUND' if found else 'NOT FOUND'}"
-            print(line)
-            result.append(line)
+    message = (
+        "OZON NETWORK CAPTURE\n\n"
+        "PAGE: " + page.url + "\n"
+        "TITLE: " + page.title() + "\n\n"
+        + "\n".join(seen[:60])
+    )
 
-        # Ищем web components
-        components = page.locator("*")
-        count = components.count()
+    telegram(message)
 
-        print("TOTAL ELEMENTS:", count)
-
-        interesting = []
-
-        for i in range(min(count, 3000)):
-            try:
-                element = components.nth(i)
-                tag = element.evaluate("(e) => e.tagName")
-                shadow = element.evaluate(
-                    "(e) => e.shadowRoot ? true : false"
-                )
-
-                if shadow:
-                    line = f"SHADOW: {tag}"
-                    print(line)
-                    interesting.append(line)
-
-            except Exception:
-                pass
-
-        message = (
-            "✈️ AIR ARABIA DIAGNOSTICS\n\n"
-            + "\n".join(result)
-            + "\n\n"
-            + "\n".join(interesting[:30])
-        )
-
-        send_telegram(message[:3900])
-
-        browser.close()
-
-
-if __name__ == "__main__":
-    main()
+    browser.close()
