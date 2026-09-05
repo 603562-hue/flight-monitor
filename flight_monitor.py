@@ -1,101 +1,94 @@
 import os
-import time
-from datetime import datetime
-
+import requests
 from playwright.sync_api import sync_playwright
-
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 URL = "https://www.airarabia.com/en/plan/reservation/book-flight"
 
-DEPARTURE = "28/12/2026"
-RETURN = "20/01/2027"
-
 
 def send_telegram(message):
-    import requests
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
     response = requests.post(
-        url,
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         data={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
         },
         timeout=30,
     )
-
     response.raise_for_status()
 
 
 def main():
-    print("Starting Air Arabia browser test")
-
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=["--no-sandbox"],
         )
 
         page = browser.new_page(
-            viewport={
-                "width": 1440,
-                "height": 1000,
-            },
+            viewport={"width": 1440, "height": 1000},
             locale="en-US",
         )
 
         print("Opening Air Arabia...")
-        page.goto(
-            URL,
-            wait_until="domcontentloaded",
-            timeout=90000,
-        )
-
+        page.goto(URL, wait_until="domcontentloaded", timeout=90000)
         page.wait_for_timeout(5000)
 
-        print("Page title:", page.title())
-        print("Current URL:", page.url)
+        print("URL:", page.url)
+        print("TITLE:", page.title())
 
-        body_text = page.locator("body").inner_text()
+        # Return / туда-обратно
+        return_option = page.get_by_text("Return", exact=True)
 
-        print("Air Arabia page loaded.")
-        print("Page contains Search & Book:",
-              "Search & Book" in body_text)
+        if return_option.count() > 0:
+            return_option.first.click()
+            print("Return selected")
+        else:
+            print("Return option not found")
 
-        print("Page contains Departure:",
-              "Departure" in body_text)
+        # Показываем доступные input'ы для диагностики
+        inputs = page.locator("input")
+        print("INPUT COUNT:", inputs.count())
 
-        print("Page contains Return:",
-              "Return" in body_text)
+        for i in range(inputs.count()):
+            try:
+                element = inputs.nth(i)
+                print(
+                    "INPUT",
+                    i,
+                    "placeholder=",
+                    element.get_attribute("placeholder"),
+                    "aria-label=",
+                    element.get_attribute("aria-label"),
+                )
+            except Exception:
+                pass
 
-        print("Page contains Passengers:",
-              "Passengers" in body_text)
+        # Показываем кнопки
+        buttons = page.locator("button")
+        print("BUTTON COUNT:", buttons.count())
 
-        print("Page contains Economy:",
-              "Economy class" in body_text)
-
-        print("Browser test completed.")
+        for i in range(min(buttons.count(), 30)):
+            try:
+                print(
+                    "BUTTON",
+                    i,
+                    "TEXT=",
+                    buttons.nth(i).inner_text()
+                )
+            except Exception:
+                pass
 
         send_telegram(
             "✈️ FLIGHT MONITOR\n\n"
-            "Air Arabia browser test успешно запущен.\n\n"
-            "Страница поиска открылась.\n"
-            "Search & Book найден.\n"
-            "Departure найден.\n"
-            "Return найден.\n"
-            "Passengers найден.\n"
-            "Economy class найден.\n\n"
-            f"Тестовые даты:\n"
-            f"{DEPARTURE} → {RETURN}\n\n"
-            "Следующий этап — автоматический ввод "
-            "дат и получение реальной цены."
+            "Реальный тест Air Arabia запущен.\n\n"
+            "Браузер открыл форму бронирования.\n"
+            "Форма Return обработана.\n\n"
+            "Следующий результат будет содержать "
+            "точные элементы формы, которые видит "
+            "автоматический браузер."
         )
 
         browser.close()
