@@ -30,5 +30,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
         run: |
           python flight_monitor.py
