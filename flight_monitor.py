@@ -1,11 +1,15 @@
 import os
+import json
 import requests
+from pathlib import Path
 from fast_flights import FlightQuery, Passengers, create_query, get_flights
 
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
+PRICE_LIMIT = 60000
+STATE_FILE = Path("flight_state.json")
 
 OUTBOUND_DATES = [
     "2026-12-28",
@@ -22,24 +26,21 @@ RETURN_DATES = [
     "2027-01-25",
 ]
 
-
 MOSCOW_AIRPORTS = [
     "SVO",
     "DME",
     "VKO",
 ]
 
-
 DESTINATIONS = {
     "BKK": "Bangkok",
     "UTP": "Pattaya / U-Tapao",
 }
 
-
 TARGET_AIRLINES = {
-    "G9": "Air Arabia",
-    "CA": "Air China",
-    "WY": "Oman Air",
+    "Air Arabia": "G9",
+    "Air China": "CA",
+    "Oman Air": "WY",
 }
 
 
@@ -57,12 +58,36 @@ def send_telegram(text):
     print("Telegram:", response.status_code)
 
 
+def load_state():
+    if not STATE_FILE.exists():
+        return {}
+
+    try:
+        return json.loads(
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+    except Exception:
+        return {}
+
+
+def save_state(state):
+    STATE_FILE.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def search_flights(
     outbound_date,
     return_date,
     from_airport,
     destination,
-    airline_codes=None,
 ):
 
     outbound = FlightQuery(
@@ -70,7 +95,6 @@ def search_flights(
         from_airport=from_airport,
         to_airport=destination,
         max_stops=1,
-        airlines=airline_codes,
     )
 
     inbound = FlightQuery(
@@ -98,7 +122,11 @@ def search_flights(
 
 
 def get_price(flight):
-    value = getattr(flight, "price", None)
+    value = getattr(
+        flight,
+        "price",
+        None,
+    )
 
     if value is None:
         return None
@@ -110,67 +138,95 @@ def get_price(flight):
 
 
 def get_airlines(flight):
-    value = getattr(flight, "airlines", [])
+    value = getattr(
+        flight,
+        "airlines",
+        [],
+    )
 
     if isinstance(value, list):
-        return ", ".join(str(x) for x in value)
+        return ", ".join(
+            str(x) for x in value
+        )
 
     return str(value)
 
 
-def get_flight_lines(flight):
-    lines = []
+def airline_match(airlines, target):
+    text = airlines.lower()
+    target = target.lower()
 
-    segments = getattr(flight, "flights", [])
+    aliases = {
+        "air arabia": [
+            "air arabia",
+            "g9",
+        ],
+        "air china": [
+            "air china",
+            "ca",
+        ],
+        "oman air": [
+            "oman air",
+            "wy",
+        ],
+    }
+
+    for alias in aliases.get(
+        target,
+        [target],
+    ):
+        if alias in text:
+            return True
+
+    return False
+
+
+def get_segments(flight):
+    segments = getattr(
+        flight,
+        "flights",
+        [],
+    )
+
+    result = []
 
     for segment in segments:
 
-        airline = getattr(segment, "airline", "")
-        number = getattr(segment, "flight_number", "")
-        departure = getattr(segment, "departure", "")
-        arrival = getattr(segment, "arrival", "")
-        duration = getattr(segment, "duration", "")
-        stops = getattr(segment, "stops", 0)
-
-        lines.append(
-            f"{airline} {number}: "
-            f"{departure} -> {arrival} "
-            f"({duration} min, stops={stops})"
+        airline = getattr(
+            segment,
+            "airline",
+            "",
         )
 
-    return lines
+        number = getattr(
+            segment,
+            "flight_number",
+            "",
+        )
+
+        departure = getattr(
+            segment,
+            "departure",
+            "",
+        )
+
+        arrival = getattr(
+            segment,
+            "arrival",
+            "",
+        )
+
+        result.append(
+            f"{airline} {number}: "
+            f"{departure} -> {arrival}"
+        )
+
+    return result
 
 
-def add_result(
-    results,
-    outbound,
-    return_date,
-    airport,
-    destination_name,
-    flight,
-    category,
-):
+def search_all():
 
-    price = get_price(flight)
-
-    if price is None:
-        return
-
-    results.append({
-        "outbound": outbound,
-        "return": return_date,
-        "airport": airport,
-        "destination": destination_name,
-        "price": price,
-        "airlines": get_airlines(flight),
-        "flight": flight,
-        "category": category,
-    })
-
-
-def search_all_airlines(results):
-
-    print("=== GENERAL SEARCH ===")
+    results = []
 
     for outbound in OUTBOUND_DATES:
 
@@ -181,7 +237,7 @@ def search_all_airlines(results):
                 for destination, destination_name in DESTINATIONS.items():
 
                     print(
-                        f"ALL "
+                        f"SEARCH "
                         f"{airport}->{destination} "
                         f"{outbound}->{return_date}"
                     )
@@ -195,94 +251,43 @@ def search_all_airlines(results):
                             destination,
                         )
 
-                        print(
-                            "Found:",
-                            len(flights)
-                        )
-
                         for flight in flights:
 
-                            add_result(
-                                results,
-                                outbound,
-                                return_date,
-                                airport,
-                                destination_name,
-                                flight,
-                                "ALL",
+                            price = get_price(
+                                flight
                             )
+
+                            if price is None:
+                                continue
+
+                            if price > PRICE_LIMIT:
+                                continue
+
+                            airlines = get_airlines(
+                                flight
+                            )
+
+                            results.append({
+                                "outbound": outbound,
+                                "return": return_date,
+                                "airport": airport,
+                                "destination": destination_name,
+                                "price": price,
+                                "airlines": airlines,
+                                "segments": get_segments(
+                                    flight
+                                ),
+                            })
 
                     except Exception as error:
 
                         print(
-                            "GENERAL ERROR:",
+                            "SEARCH ERROR:",
                             type(error).__name__,
                             str(error),
                         )
 
-
-def search_target_airlines(results):
-
-    print("=== TARGET AIRLINES ===")
-
-    for code, airline_name in TARGET_AIRLINES.items():
-
-        print(
-            f"=== {airline_name} ({code}) ==="
-        )
-
-        for outbound in OUTBOUND_DATES:
-
-            for return_date in RETURN_DATES:
-
-                # For the airline-specific search we check
-                # Bangkok, which is the main target.
-                destination = "BKK"
-                destination_name = "Bangkok"
-
-                for airport in MOSCOW_AIRPORTS:
-
-                    print(
-                        f"{airline_name} "
-                        f"{airport}->BKK "
-                        f"{outbound}->{return_date}"
-                    )
-
-                    try:
-
-                        flights = search_flights(
-                            outbound,
-                            return_date,
-                            airport,
-                            destination,
-                            airline_codes=[code],
-                        )
-
-                        print(
-                            "Found:",
-                            len(flights)
-                        )
-
-                        for flight in flights:
-
-                            add_result(
-                                results,
-                                outbound,
-                                return_date,
-                                airport,
-                                destination_name,
-                                flight,
-                                code,
-                            )
-
-                    except Exception as error:
-
-                        print(
-                            "AIRLINE ERROR:",
-                            code,
-                            type(error).__name__,
-                            str(error),
-                        )
+    return results
 
 
 def remove_duplicates(results):
@@ -299,7 +304,6 @@ def remove_duplicates(results):
             item["destination"],
             item["price"],
             item["airlines"],
-            item["category"],
         )
 
         if key in seen:
@@ -311,108 +315,35 @@ def remove_duplicates(results):
     return unique
 
 
-def build_message(results):
+def make_key(item):
 
-    results.sort(
-        key=lambda item: item["price"]
+    return (
+        f"{item['outbound']}|"
+        f"{item['return']}|"
+        f"{item['airport']}|"
+        f"{item['destination']}|"
+        f"{item['airlines']}"
     )
+
+
+def build_message(item):
 
     message = (
-        "✈️ МОСКВА → БАНГКОК / ПАТТАЙЯ\n\n"
-        "Вылет: 28–30.12.2026\n"
-        "Возврат: 20–25.01.2027\n"
-        "1 взрослый • Economy\n"
-        "Максимум 1 пересадка\n"
-        "Без багажа\n\n"
-    )
+        "🚨 ДЕШЁВЫЙ БИЛЕТ!\n\n"
+        f"💰 {item['price']:,} ₽\n"
+        f"📅 {item['outbound']} → "
+        f"{item['return']}\n"
+        f"🛫 {item['airport']}\n"
+        f"🛬 {item['destination']}\n"
+        f"✈️ {item['airlines']}\n\n"
+    ).replace(",", " ")
 
-    message += "🏆 САМЫЕ ДЕШЁВЫЕ ВАРИАНТЫ\n\n"
-
-    for item in results[:10]:
-
-        message += (
-            f"💰 {item['price']:,} ₽\n"
-            f"📅 {item['outbound']} → "
-            f"{item['return']}\n"
-            f"🛫 {item['airport']}\n"
-            f"🛬 {item['destination']}\n"
-            f"✈️ {item['airlines']}\n"
-        ).replace(",", " ")
-
-        lines = get_flight_lines(
-            item["flight"]
-        )
-
-        for line in lines:
-            message += f"{line}\n"
-
-        message += "\n"
-
-
-    message += "⭐ AIR ARABIA / AIR CHINA / OMAN AIR\n\n"
-
-
-    for code, airline_name in TARGET_AIRLINES.items():
-
-        matches = [
-            item
-            for item in results
-            if item["category"] == code
-        ]
-
-        matches.sort(
-            key=lambda item: item["price"]
-        )
-
-        if not matches:
-
-            message += (
-                f"🔹 {airline_name} ({code})\n"
-                f"В заданных датах не найдено.\n\n"
-            )
-
-            continue
-
-
-        # Show up to three different date combinations
-        shown = 0
-        seen_dates = set()
-
-        message += (
-            f"🔹 {airline_name} ({code})\n"
-        )
-
-        for item in matches:
-
-            date_key = (
-                item["outbound"],
-                item["return"],
-                item["airport"],
-            )
-
-            if date_key in seen_dates:
-                continue
-
-            seen_dates.add(date_key)
-
-            message += (
-                f"💰 {item['price']:,} ₽\n"
-                f"📅 {item['outbound']} → "
-                f"{item['return']}\n"
-                f"🛫 {item['airport']}\n"
-            ).replace(",", " ")
-
-            shown += 1
-
-            if shown >= 3:
-                break
-
-        message += "\n"
-
+    for segment in item["segments"]:
+        message += f"{segment}\n"
 
     message += (
-        "Источник: Google Flights / fast-flights.\n"
-        "Проверены все заданные даты."
+        "\nУсловие: ≤ 60 000 ₽\n"
+        "Источник: Google Flights / fast-flights."
     )
 
     return message
@@ -420,58 +351,73 @@ def build_message(results):
 
 def main():
 
-    print("================================")
     print("FLIGHT MONITOR START")
-    print("================================")
-
-    all_results = []
-
-    search_all_airlines(
-        all_results
+    print(
+        f"Price limit: {PRICE_LIMIT} RUB"
     )
 
-    search_target_airlines(
-        all_results
+    state = load_state()
+
+    results = search_all()
+
+    results = remove_duplicates(
+        results
+    )
+
+    results.sort(
+        key=lambda x: x["price"]
     )
 
     print(
-        "Raw results:",
-        len(all_results)
+        f"Found under limit: {len(results)}"
     )
 
-    all_results = remove_duplicates(
-        all_results
-    )
+    if not results:
 
-    print(
-        "Unique results:",
-        len(all_results)
-    )
-
-    if not all_results:
-
-        send_telegram(
-            "✈️ FLIGHT MONITOR\n\n"
-            "Google Flights не вернул "
-            "ни одного результата.\n\n"
-            "Подробная причина находится "
-            "в GitHub Actions log."
+        print(
+            "No flights at or below "
+            f"{PRICE_LIMIT} RUB."
         )
 
+        save_state(state)
         return
 
 
-    message = build_message(
-        all_results
+    notifications = 0
+
+    for item in results:
+
+        key = make_key(item)
+
+        old_price = state.get(key)
+
+        new_price = item["price"]
+
+        # Notify if:
+        # 1. this itinerary is new
+        # 2. price became lower
+        if (
+            old_price is None
+            or new_price < old_price
+        ):
+
+            send_telegram(
+                build_message(item)
+            )
+
+            notifications += 1
+
+        state[key] = new_price
+
+
+    save_state(state)
+
+    print(
+        f"Notifications sent: "
+        f"{notifications}"
     )
 
-    send_telegram(
-        message
-    )
-
-    print("================================")
     print("FLIGHT MONITOR FINISHED")
-    print("================================")
 
 
 if __name__ == "__main__":
