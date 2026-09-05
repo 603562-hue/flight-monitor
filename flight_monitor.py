@@ -10,75 +10,63 @@ API_URL = "https://www.searchapi.io/api/v1/search"
 DEPARTURE = "SVO,DME,VKO"
 ARRIVAL = "BKK,UTP"
 
-OUTBOUND_START = "2026-12-28"
-OUTBOUND_END = "2026-12-30"
+OUTBOUND_DATES = [
+    "2026-12-28",
+    "2026-12-29",
+    "2026-12-30",
+]
 
-RETURN_START = "2027-01-20"
-RETURN_END = "2027-01-25"
+RETURN_DATES = [
+    "2027-01-20",
+    "2027-01-21",
+    "2027-01-22",
+    "2027-01-23",
+    "2027-01-24",
+    "2027-01-25",
+]
+
+AIRLINES = {
+    "G9": "Air Arabia",
+    "CA": "Air China",
+    "WY": "Oman Air",
+}
 
 
-def search_calendar():
-    params = {
-        "engine": "google_flights_calendar",
-        "api_key": API_KEY,
-        "flight_type": "round_trip",
-
-        "departure_id": DEPARTURE,
-        "arrival_id": ARRIVAL,
-
-        "outbound_date": OUTBOUND_START,
-        "outbound_date_start": OUTBOUND_START,
-        "outbound_date_end": OUTBOUND_END,
-
-        "return_date": RETURN_START,
-        "return_date_start": RETURN_START,
-        "return_date_end": RETURN_END,
-
-        "travel_class": "economy",
-        "stops": "one_stop_or_fewer",
-
-        "adults": "1",
-        "children": "0",
-        "infants_in_seat": "0",
-        "infants_on_lap": "0",
-
-        "carry_on_bags": "0",
-        "checked_bags": "0",
-
-        "currency": "RUB",
-        "gl": "ru",
-        "hl": "ru",
-    }
-
-    response = requests.get(API_URL, params=params, timeout=90)
+def api_request(params):
+    response = requests.get(
+        API_URL,
+        params=params,
+        timeout=90
+    )
 
     print("HTTP:", response.status_code)
 
     if response.status_code != 200:
         print(response.text)
-        return []
+        return {}
 
-    data = response.json()
-    return data.get("calendar", [])
+    return response.json()
 
 
-def search_flights(departure_date, return_date):
+def search_flights(outbound, return_date, airline=None):
+
     params = {
         "engine": "google_flights",
         "api_key": API_KEY,
+
         "flight_type": "round_trip",
 
         "departure_id": DEPARTURE,
         "arrival_id": ARRIVAL,
 
-        "outbound_date": departure_date,
+        "outbound_date": outbound,
         "return_date": return_date,
 
         "travel_class": "economy",
+
         "stops": "one_stop_or_fewer",
+
         "sort_by": "price",
-        "show_cheapest_flights": "true",
-        "expanded_search": "true",
 
         "adults": "1",
         "children": "0",
@@ -93,33 +81,37 @@ def search_flights(departure_date, return_date):
         "hl": "ru",
     }
 
-    response = requests.get(API_URL, params=params, timeout=90)
+    if airline:
+        params["airline"] = airline
 
-    if response.status_code != 200:
-        print("Flight search error:", response.text)
-        return {}
-
-    return response.json()
+    return api_request(params)
 
 
-def telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def extract_flights(data):
 
-    requests.post(
-        url,
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "disable_web_page_preview": True,
-        },
-        timeout=30,
+    flights = data.get("best_flights", [])
+
+    if not flights:
+        flights = data.get("other_flights", [])
+
+    flights = [
+        f for f in flights
+        if f.get("price") is not None
+    ]
+
+    flights.sort(
+        key=lambda x: x.get("price", 999999999)
     )
 
+    return flights
 
-def flight_summary(flight):
+
+def flight_text(flight):
+
     lines = []
 
     for segment in flight.get("flights", []):
+
         dep = segment.get("departure_airport", {})
         arr = segment.get("arrival_airport", {})
 
@@ -132,112 +124,169 @@ def flight_summary(flight):
             f"{arr.get('id')} {arr.get('time')}"
         )
 
-    layovers = flight.get("layovers", [])
+    for layover in flight.get("layovers", []):
 
-    if layovers:
-        for layover in layovers:
-            lines.append(
-                f"Пересадка: {layover.get('name')} "
-                f"{layover.get('duration')} мин."
-            )
+        name = layover.get("name", "")
+        duration = layover.get("duration", "")
+
+        lines.append(
+            f"Пересадка: {name} {duration} мин."
+        )
 
     return "\n".join(lines)
 
 
+def telegram(message):
+
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "disable_web_page_preview": True,
+        },
+        timeout=30,
+    )
+
+
 def main():
-    print("Searching date combinations...")
 
-    calendar = search_calendar()
+    print("START FLIGHT MONITOR")
 
-    if not calendar:
-        telegram(
-            "Flight Monitor\n\n"
-            "Не удалось получить календарь цен SearchApi."
-        )
-        return
+    all_results = []
 
-    valid = []
+    # Общий поиск
+    print("Searching all airlines...")
 
-    for item in calendar:
-        if item.get("has_no_flights"):
-            continue
+    for outbound in OUTBOUND_DATES:
 
-        price = item.get("price")
+        for return_date in RETURN_DATES:
 
-        if price is None:
-            continue
-
-        valid.append(item)
-
-    valid.sort(key=lambda x: x["price"])
-
-    if not valid:
-        telegram(
-            "Flight Monitor\n\n"
-            "На заданные даты подходящих вариантов не найдено."
-        )
-        return
-
-    # Проверяем только 3 самых дешевых комбинации.
-    # Это экономит бесплатные API-запросы.
-    best_dates = valid[:3]
-
-    results = []
-
-    for item in best_dates:
-        departure = item["departure"]
-        return_date = item["return"]
-
-        print(
-            "Checking:",
-            departure,
-            return_date,
-            item["price"]
-        )
-
-        data = search_flights(departure, return_date)
-
-        flights = data.get("best_flights", [])
-
-        if not flights:
-            flights = data.get("other_flights", [])
-
-        if flights:
-            flights.sort(key=lambda x: x.get("price", 10**9))
-            results.append(
-                (departure, return_date, flights[0])
+            print(
+                "ALL:",
+                outbound,
+                return_date
             )
 
-    results.sort(key=lambda x: x[2].get("price", 10**9))
+            data = search_flights(
+                outbound,
+                return_date
+            )
 
-    message = "✈️ МОСКВА → БАНГКОК\n\n"
-    message += "Проверено:\n"
-    message += "28–30.12.2026 → 20–25.01.2027\n"
-    message += "1 взрослый • Economy • максимум 1 пересадка\n"
-    message += "Без багажа\n\n"
+            flights = extract_flights(data)
 
-    if not results:
-        message += "Конкретные рейсы получить не удалось."
-        telegram(message)
-        return
+            if flights:
 
-    for departure, return_date, flight in results[:3]:
-        price = flight.get("price", "—")
+                all_results.append({
+                    "type": "ALL",
+                    "airline": "Все авиакомпании",
+                    "outbound": outbound,
+                    "return": return_date,
+                    "flight": flights[0],
+                })
+
+    # Отдельный поиск Air Arabia / Air China / Oman Air
+    airline_results = []
+
+    for code, name in AIRLINES.items():
+
+        print("AIRLINE:", name)
+
+        for outbound in OUTBOUND_DATES:
+
+            for return_date in RETURN_DATES:
+
+                print(
+                    name,
+                    outbound,
+                    return_date
+                )
+
+                data = search_flights(
+                    outbound,
+                    return_date,
+                    code
+                )
+
+                flights = extract_flights(data)
+
+                if flights:
+
+                    airline_results.append({
+                        "type": code,
+                        "airline": name,
+                        "outbound": outbound,
+                        "return": return_date,
+                        "flight": flights[0],
+                    })
+
+    # Сортировка
+    all_results.sort(
+        key=lambda x: x["flight"].get("price", 999999999)
+    )
+
+    airline_results.sort(
+        key=lambda x: x["flight"].get("price", 999999999)
+    )
+
+    message = (
+        "✈️ МОСКВА → БАНГКОК\n\n"
+        "Даты вылета: 28–30.12.2026\n"
+        "Возврат: 20–25.01.2027\n"
+        "1 взрослый • Economy\n"
+        "Максимум 1 пересадка\n"
+        "Без багажа\n\n"
+    )
+
+    # Самые дешевые общие варианты
+    message += "🏆 САМЫЕ ДЕШЕВЫЕ ВАРИАНТЫ\n\n"
+
+    for item in all_results[:5]:
+
+        price = item["flight"].get("price", 0)
 
         message += (
             f"💰 {price:,} ₽\n"
-            f"📅 {departure} → {return_date}\n"
-        ).replace(",", " ")
+            f"📅 {item['outbound']} → {item['return']}\n"
+            f"{flight_text(item['flight'])}\n\n"
+        )
 
-        message += flight_summary(flight)
-        message += "\n\n"
+    # Лучшие среди конкретных авиакомпаний
+    message += "✈️ КОНКРЕТНЫЕ АВИАКОМПАНИИ\n\n"
+
+    for code, name in AIRLINES.items():
+
+        matches = [
+            x for x in airline_results
+            if x["type"] == code
+        ]
+
+        if not matches:
+
+            message += (
+                f"{name}: вариантов не найдено\n\n"
+            )
+
+            continue
+
+        best = matches[0]
+
+        price = best["flight"].get("price", 0)
+
+        message += (
+            f"🔹 {name}\n"
+            f"💰 {price:,} ₽\n"
+            f"📅 {best['outbound']} → {best['return']}\n"
+            f"{flight_text(best['flight'])}\n\n"
+        )
 
     message += (
-        "Источник: Google Flights через SearchApi.\n"
-        "Следующая проверка покажет новую цену."
+        "Источник: Google Flights через SearchApi."
     )
 
     telegram(message)
+
+    print("DONE")
 
 
 if __name__ == "__main__":
