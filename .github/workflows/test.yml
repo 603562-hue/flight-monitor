@@ -7,6 +7,6 @@ jobs:
   get-chat-id:
     runs-on: ubuntu-latest
     steps:
-      - name: Get Telegram updates
+      - name: Check Telegram webhook
         run: |
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getUpdates"
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getWebhookInfo"
