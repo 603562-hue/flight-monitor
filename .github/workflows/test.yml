@@ -6,6 +6,17 @@ on:
 jobs:
   get-chat-id:
     runs-on: ubuntu-latest
+    steps:
+      - name: Get Telegram updates
+        run: |
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getUpdates"name: Get Telegram Chat ID
+
+on:
+  workflow_dispatch:
+
+jobs:
+  get-chat-id:
+    runs-on: ubuntu-latest
 
     steps:
       - name: Get Telegram updates
