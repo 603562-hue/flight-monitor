@@ -24,10 +24,7 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
 
         page = browser.new_page(
@@ -36,94 +33,68 @@ def main():
         )
 
         print("Opening Air Arabia...")
-        page.goto(
-            URL,
-            wait_until="domcontentloaded",
-            timeout=90000,
-        )
+        page.goto(URL, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(15000)
 
-        page.wait_for_timeout(10000)
+        print("TITLE:", page.title())
+        print("URL:", page.url)
 
-        print("PAGE URL:", page.url)
-        print("PAGE TITLE:", page.title())
+        # Получаем весь видимый текст страницы
+        text = page.locator("body").inner_text()
 
-        messages = []
+        print("BODY TEXT LENGTH:", len(text))
+        print(text[:5000])
 
-        frames = page.frames
+        # Ищем элементы по тексту
+        checks = [
+            "One way",
+            "Return",
+            "Departure",
+            "Passengers",
+            "Economy class",
+            "Search & Book",
+        ]
 
-        print("FRAME COUNT:", len(frames))
+        result = []
 
-        for frame_index, frame in enumerate(frames):
-            print("")
-            print("===== FRAME", frame_index, "=====")
-            print("FRAME URL:", frame.url)
+        for item in checks:
+            found = item in text
+            line = f"{item}: {'FOUND' if found else 'NOT FOUND'}"
+            print(line)
+            result.append(line)
 
+        # Ищем web components
+        components = page.locator("*")
+        count = components.count()
+
+        print("TOTAL ELEMENTS:", count)
+
+        interesting = []
+
+        for i in range(min(count, 3000)):
             try:
-                inputs = frame.locator("input")
-                buttons = frame.locator("button")
-
-                input_count = inputs.count()
-                button_count = buttons.count()
-
-                print("INPUT COUNT:", input_count)
-                print("BUTTON COUNT:", button_count)
-
-                messages.append(
-                    f"FRAME {frame_index}\n"
-                    f"URL: {frame.url[:180]}\n"
-                    f"INPUTS: {input_count}\n"
-                    f"BUTTONS: {button_count}"
+                element = components.nth(i)
+                tag = element.evaluate("(e) => e.tagName")
+                shadow = element.evaluate(
+                    "(e) => e.shadowRoot ? true : false"
                 )
 
-                for i in range(min(input_count, 20)):
-                    element = inputs.nth(i)
+                if shadow:
+                    line = f"SHADOW: {tag}"
+                    print(line)
+                    interesting.append(line)
 
-                    info = (
-                        f"INPUT {i}: "
-                        f"type={element.get_attribute('type')} | "
-                        f"name={element.get_attribute('name')} | "
-                        f"id={element.get_attribute('id')} | "
-                        f"placeholder={element.get_attribute('placeholder')} | "
-                        f"aria={element.get_attribute('aria-label')}"
-                    )
+            except Exception:
+                pass
 
-                    print(info)
-                    messages.append(info)
-
-                for i in range(min(button_count, 20)):
-                    element = buttons.nth(i)
-
-                    try:
-                        text = element.inner_text().strip()
-                    except Exception:
-                        text = ""
-
-                    info = (
-                        f"BUTTON {i}: "
-                        f"text={text[:100]} | "
-                        f"aria={element.get_attribute('aria-label')} | "
-                        f"type={element.get_attribute('type')}"
-                    )
-
-                    print(info)
-                    messages.append(info)
-
-            except Exception as e:
-                print("FRAME ERROR:", str(e))
-                messages.append(
-                    f"FRAME {frame_index} ERROR: {str(e)[:200]}"
-                )
-
-        diagnostic = "\n".join(messages)
-
-        # Telegram has a 4096 character limit.
-        diagnostic = diagnostic[:3800]
-
-        send_telegram(
-            "✈️ FLIGHT MONITOR\n\n"
-            "Диагностика формы Air Arabia.\n\n"
-            f"{diagnostic}"
+        message = (
+            "✈️ AIR ARABIA DIAGNOSTICS\n\n"
+            + "\n".join(result)
+            + "\n\n"
+            + "\n".join(interesting[:30])
         )
+
+        send_telegram(message[:3900])
 
         browser.close()
 
