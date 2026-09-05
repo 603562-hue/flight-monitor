@@ -2,11 +2,13 @@ name: Flight Monitor
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -20,16 +22,11 @@ jobs:
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
-          pip install playwright requests
-
-      - name: Install Chromium
-        run: |
-          playwright install --with-deps chromium
+          pip install fast-flights==3.1.0 requests
 
       - name: Run Flight Monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
         run: |
           python flight_monitor.py
