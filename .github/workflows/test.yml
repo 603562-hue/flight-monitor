@@ -7,6 +7,6 @@ jobs:
   get-chat-id:
     runs-on: ubuntu-latest
     steps:
-      - name: Check Telegram webhook
+      - name: Get Telegram Chat ID
         run: |
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getWebhookInfo"
+          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getUpdates" | python -c 'import sys,json; d=json.load(sys.stdin); print([u["message"]["chat"]["id"] for u in d["result"] if "message" in u])'
