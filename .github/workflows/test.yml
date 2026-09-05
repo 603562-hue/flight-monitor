@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v5
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -25,11 +25,12 @@ jobs:
           pip install fast-flights==3.1.0 typing_extensions requests
 
       - name: Restore price history
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: flight_state.json
-          key: flight-monitor-state-${{ github.ref_name }}
+          key: flight-monitor-state-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
+            flight-monitor-state-${{ github.ref_name }}-
             flight-monitor-state-
 
       - name: Run Flight Monitor
@@ -40,7 +41,7 @@ jobs:
           python flight_monitor.py
 
       - name: Save price history
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: flight_state.json
           key: flight-monitor-state-${{ github.ref_name }}-${{ github.run_id }}
