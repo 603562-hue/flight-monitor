@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 # ОСНОВНЫЕ НАСТРОЙКИ
 # ============================================================
 
-PRICE_LIMIT_RUB = 70000
+PRICE_LIMIT_RUB = 100000
 
 RUB_PER_USD = 86.59
 
