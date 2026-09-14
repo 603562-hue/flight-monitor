@@ -1,59 +1,22 @@
-import os
 import json
+import os
 import traceback
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
-from fast_flights import (
-    FlightQuery,
-    Passengers,
-    create_query,
-    get_flights,
-)
+from fast_flights import FlightData, Passengers, get_flights
 
 
 # ============================================================
-# TELEGRAM
+# CONFIG
 # ============================================================
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+PRICE_LIMIT = 100000
 
-
-# ============================================================
-# AVIASALES
-# ============================================================
-
-AVIASALES_TOKEN = os.environ.get(
-    "AVIASALES_API_TOKEN",
-    ""
-)
-
-AVIASALES_API_URL = (
-    "https://api.travelpayouts.com/"
-    "aviasales/v3/prices_for_dates"
-)
-
-
-# ============================================================
-# ОСНОВНЫЕ НАСТРОЙКИ
-# ============================================================
-
-PRICE_LIMIT_RUB = 100000
-
-RUB_PER_USD = 86.59
-
-PRICE_LIMIT_USD = (
-    PRICE_LIMIT_RUB / RUB_PER_USD
-)
-
-
-# ============================================================
-# ДАТЫ ПОИСКА
-# ============================================================
-
-OUTBOUND_DATES = [
+DEPARTURE_DATES = [
     "2026-12-26",
     "2026-12-27",
 ]
@@ -64,1210 +27,741 @@ RETURN_DATES = [
     "2027-01-11",
 ]
 
-
-# ============================================================
-# АЭРОПОРТЫ МОСКВЫ
-# ============================================================
-
-MOSCOW_AIRPORTS = [
+ORIGIN_AIRPORTS = [
     "SVO",
     "DME",
     "VKO",
 ]
 
+DESTINATIONS = [
+    "BKK",
+    "UTP",
+]
 
-# ============================================================
-# ПУНКТЫ НАЗНАЧЕНИЯ
-# ============================================================
+PASSENGERS = Passengers(adults=1)
 
-DESTINATIONS = {
-    "BKK": "Bangkok",
-    "UTP": "Pattaya / U-Tapao",
-}
+STATE_FILE = Path("flight_state.json")
 
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# ============================================================
-# ФАЙЛ СОСТОЯНИЯ
-# ============================================================
-
-STATE_FILE = Path(
-    "flight_state.json"
+AVIASALES_TOKEN = os.environ.get("AVIASALES_API_TOKEN", "")
+AVIASALES_API_URL = (
+    "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
 )
 
 
 # ============================================================
-# HTTP SESSION
+# HELPERS
 # ============================================================
 
-SESSION = requests.Session()
+def safe_float(value):
+    try:
+        if value is None:
+            return None
 
-SESSION.headers.update({
-    "User-Agent": (
-        "Maxim-Flight-Monitor/1.0"
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        text = str(value).strip()
+        text = (
+            text.replace("₽", "")
+            .replace("RUB", "")
+            .replace(",", ".")
+            .replace(" ", "")
+        )
+
+        return float(text)
+    except Exception:
+        return None
+
+
+def safe_int(value):
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def fmt_price(value):
+    value = safe_float(value)
+
+    if value is None:
+        return "—"
+
+    return f"{value:,.0f}".replace(",", " ") + " ₽"
+
+
+def get_attr(obj, *names, default=None):
+    """
+    Универсальный доступ как к dataclass/object, так и к dict.
+    """
+    if obj is None:
+        return default
+
+    if isinstance(obj, dict):
+        for name in names:
+            if name in obj:
+                return obj[name]
+
+    for name in names:
+        try:
+            value = getattr(obj, name)
+            return value
+        except Exception:
+            continue
+
+    return default
+
+
+def normalize_stops(value):
+    """
+    Преобразует разные варианты представления пересадок в int.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, float):
+        return int(value)
+
+    text = str(value).strip().lower()
+
+    if text in {"nonstop", "direct", "без пересадок"}:
+        return 0
+
+    if text in {"1 stop", "one stop", "1 пересадка"}:
+        return 1
+
+    if text in {"2 stops", "2 пересадки"}:
+        return 2
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+
+    if digits:
+        try:
+            return int(digits)
+        except Exception:
+            pass
+
+    return None
+
+
+def load_state():
+    if not STATE_FILE.exists():
+        return {}
+
+    try:
+        with STATE_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            return data
+
+    except Exception:
+        pass
+
+    return {}
+
+
+def save_state(state):
+    try:
+        with STATE_FILE.open("w", encoding="utf-8") as f:
+            json.dump(
+                state,
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+    except Exception:
+        pass
+
+
+def make_key(source, origin, destination, departure, return_date):
+    return (
+        f"{source}|{origin}|{destination}|"
+        f"{departure}|{return_date}"
     )
-})
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def send_telegram(text):
+def telegram_send(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
 
     try:
-
-        response = SESSION.post(
-            (
-                "https://api.telegram.org/"
-                f"bot{TELEGRAM_TOKEN}/sendMessage"
-            ),
-            data={
-                "chat_id":
-                    TELEGRAM_CHAT_ID,
-
-                "text":
-                    text[:4000],
-
-                "disable_web_page_preview":
-                    True,
-            },
+        response = requests.post(
+            url,
+            json=payload,
             timeout=30,
         )
 
-        print(
-            "Telegram:",
-            response.status_code
-        )
+        response.raise_for_status()
+        return True
 
-        if not response.ok:
-
-            print(
-                "Telegram error:",
-                response.text
-            )
-
-        return response.ok
-
-    except Exception as error:
-
-        print(
-            "TELEGRAM ERROR:",
-            type(error).__name__,
-            str(error),
-        )
-
+    except Exception:
         return False
-
-
-# ============================================================
-# СОСТОЯНИЕ
-# ============================================================
-
-def load_state():
-
-    if not STATE_FILE.exists():
-
-        return {}
-
-    try:
-
-        return json.loads(
-            STATE_FILE.read_text(
-                encoding="utf-8"
-            )
-        )
-
-    except Exception as error:
-
-        print(
-            "STATE LOAD ERROR:",
-            type(error).__name__,
-            str(error),
-        )
-
-        return {}
-
-
-def save_state(state):
-
-    STATE_FILE.write_text(
-        json.dumps(
-            state,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
 
 
 # ============================================================
 # GOOGLE FLIGHTS
 # ============================================================
 
-def search_google_flights(
-    outbound_date,
-    return_date,
-    from_airport,
+def search_google(
+    origin,
     destination,
+    departure_date,
+    return_date,
 ):
+    """
+    Один round-trip поиск Google Flights.
 
-    outbound = FlightQuery(
-        date=outbound_date,
-        from_airport=from_airport,
-        to_airport=destination,
-        max_stops=1,
-    )
+    Мы намеренно НЕ ограничиваем цену на уровне запроса:
+    сначала пытаемся получить самый дешёвый найденный тариф,
+    а уже потом применяем PRICE_LIMIT.
+    """
 
-    inbound = FlightQuery(
-        date=return_date,
-        from_airport=destination,
-        to_airport=from_airport,
-        max_stops=1,
-    )
-
-    query = create_query(
-        flights=[
-            outbound,
-            inbound,
-        ],
-
-        trip="round-trip",
-
-        seat="economy",
-
-        passengers=Passengers(
-            adults=1
+    flight_data = [
+        FlightData(
+            date=departure_date,
+            from_airport=origin,
+            to_airport=destination,
         ),
+        FlightData(
+            date=return_date,
+            from_airport=destination,
+            to_airport=origin,
+        ),
+    ]
 
-        currency="RUB",
-
-        language="ru-RU",
-
-        carry_on_bags=0,
-
-        checked_bags=0,
+    result = get_flights(
+        flight_data=flight_data,
+        trip="round-trip",
+        seat="economy",
+        passengers=PASSENGERS,
     )
-
-    return get_flights(query)
-
-
-# ============================================================
-# GOOGLE PRICE
-# ============================================================
-
-def get_price(flight):
-
-    value = getattr(
-        flight,
-        "price",
-        None,
-    )
-
-    if value is None:
-
-        return None
-
-    try:
-
-        return int(value)
-
-    except Exception:
-
-        return None
-
-
-# ============================================================
-# GOOGLE AIRLINES
-# ============================================================
-
-def get_airlines(flight):
-
-    value = getattr(
-        flight,
-        "airlines",
-        [],
-    )
-
-    if isinstance(value, list):
-
-        return ", ".join(
-            str(x)
-            for x in value
-        )
-
-    return str(value)
-
-
-# ============================================================
-# GOOGLE SEGMENTS
-# ============================================================
-
-def get_segments(flight):
-
-    segments = getattr(
-        flight,
-        "flights",
-        [],
-    )
-
-    result = []
-
-    for segment in segments:
-
-        airline = getattr(
-            segment,
-            "airline",
-            "",
-        )
-
-        number = getattr(
-            segment,
-            "flight_number",
-            "",
-        )
-
-        departure = getattr(
-            segment,
-            "departure",
-            "",
-        )
-
-        arrival = getattr(
-            segment,
-            "arrival",
-            "",
-        )
-
-        duration = getattr(
-            segment,
-            "duration",
-            "",
-        )
-
-        result.append({
-            "airline":
-                str(airline),
-
-            "number":
-                str(number),
-
-            "departure":
-                str(departure),
-
-            "arrival":
-                str(arrival),
-
-            "duration":
-                str(duration),
-        })
 
     return result
 
 
+def normalize_google_results(result, origin, destination):
+    """
+    Приводит Google/fast-flights результаты
+    к простому списку словарей.
+    """
+
+    flights = get_attr(result, "flights", default=None)
+
+    if flights is None:
+        return []
+
+    if not isinstance(flights, (list, tuple)):
+        flights = [flights]
+
+    normalized = []
+
+    for flight in flights:
+        try:
+            price_raw = get_attr(
+                flight,
+                "price",
+                "price_value",
+                "amount",
+            )
+
+            price = safe_float(price_raw)
+
+            if price is None:
+                continue
+
+            airline = get_attr(
+                flight,
+                "name",
+                "airline",
+                "airline_name",
+                default="",
+            )
+
+            departure = get_attr(
+                flight,
+                "departure",
+                "departure_time",
+                default="",
+            )
+
+            arrival = get_attr(
+                flight,
+                "arrival",
+                "arrival_time",
+                default="",
+            )
+
+            duration = get_attr(
+                flight,
+                "duration",
+                default="",
+            )
+
+            stops_raw = get_attr(
+                flight,
+                "stops",
+                "stop_count",
+                "number_of_stops",
+            )
+
+            stops = normalize_stops(stops_raw)
+
+            normalized.append(
+                {
+                    "source": "Google",
+                    "origin": origin,
+                    "destination": destination,
+                    "price": price,
+                    "airline": str(airline or ""),
+                    "departure": str(departure or ""),
+                    "arrival": str(arrival or ""),
+                    "duration": str(duration or ""),
+                    "stops": stops,
+                    "link": "",
+                }
+            )
+
+        except Exception:
+            continue
+
+    normalized.sort(
+        key=lambda x: x["price"]
+    )
+
+    return normalized
+
+
 # ============================================================
-# AVIASALES SEARCH
+# AVIASALES
 # ============================================================
 
 def search_aviasales(
-    outbound_date,
-    return_date,
-    from_airport,
+    origin,
     destination,
+    departure_date,
+    return_date,
 ):
-
     if not AVIASALES_TOKEN:
-
         raise RuntimeError(
             "AVIASALES_API_TOKEN is not configured"
         )
 
     params = {
-
-        "origin":
-            from_airport,
-
-        "destination":
-            destination,
-
-        "departure_at":
-            outbound_date,
-
-        "return_at":
-            return_date,
-
-        "unique":
-            "false",
-
-        "sorting":
-            "price",
-
-        "direct":
-            "false",
-
-        "currency":
-            "rub",
-
-        "limit":
-            30,
-
-        "page":
-            1,
-
-        "one_way":
-            "false",
-
-        "token":
-            AVIASALES_TOKEN,
+        "origin": origin,
+        "destination": destination,
+        "departure_at": departure_date,
+        "return_at": return_date,
+        "unique": "false",
+        "sorting": "price",
+        "direct": "false",
+        "currency": "rub",
+        "limit": 30,
+        "page": 1,
+        "one_way": "false",
+        "token": AVIASALES_TOKEN,
     }
 
-    response = SESSION.get(
+    response = requests.get(
         AVIASALES_API_URL,
         params=params,
-        timeout=60,
+        timeout=30,
     )
 
-    print(
-        "Aviasales HTTP:",
-        response.status_code
-    )
-
-    if not response.ok:
-
-        raise RuntimeError(
-            (
-                "Aviasales HTTP "
-                f"{response.status_code}: "
-                f"{response.text[:300]}"
-            )
-        )
+    response.raise_for_status()
 
     data = response.json()
 
-    if not data.get("success", False):
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            "Aviasales returned invalid JSON"
+        )
+
+    if data.get("success") is False:
+        error_message = data.get("error")
+
+        if isinstance(error_message, dict):
+            error_message = json.dumps(
+                error_message,
+                ensure_ascii=False,
+            )
 
         raise RuntimeError(
-            "Aviasales API error: "
-            + str(data.get("error"))
+            f"Aviasales API error: {error_message or 'unknown error'}"
         )
 
-    return data.get(
-        "data",
-        []
-    )
+    return data
 
 
-# ============================================================
-# ДОБАВЛЕНИЕ GOOGLE РЕЗУЛЬТАТА
-# ============================================================
-
-def add_google_result(
-    results,
-    outbound,
+def normalize_aviasales_results(
+    data,
+    origin,
+    destination,
+    departure_date,
     return_date,
-    airport,
-    destination_code,
-    flight,
 ):
+    """
+    Aviasales /v3/prices_for_dates historically may return:
+      data as dict keyed by date
+    or
+      data as list.
 
-    price = get_price(flight)
+    Поддерживаем оба варианта.
+    """
 
-    if price is None:
+    raw_data = data.get("data")
 
-        return
+    if not raw_data:
+        return []
 
-    if price > PRICE_LIMIT_RUB:
+    records = []
 
-        return
+    if isinstance(raw_data, dict):
+        records.extend(raw_data.values())
 
-    airlines = get_airlines(
-        flight
-    )
-
-    results.append({
-
-        "source":
-            "Google Flights",
-
-        "outbound":
-            outbound,
-
-        "return":
-            return_date,
-
-        "airport":
-            airport,
-
-        "destination":
-            destination_code,
-
-        "destination_name":
-            DESTINATIONS[
-                destination_code
-            ],
-
-        "price":
-            price,
-
-        "airlines":
-            airlines,
-
-        "segments":
-            get_segments(flight),
-
-        "transfers":
-            None,
-
-    })
-
-
-# ============================================================
-# ДОБАВЛЕНИЕ AVIASALES РЕЗУЛЬТАТА
-# ============================================================
-
-def add_aviasales_result(
-    results,
-    outbound,
-    return_date,
-    airport,
-    destination_code,
-    item,
-):
-
-    try:
-
-        price = int(
-            item.get(
-                "price",
-                0
-            )
-        )
-
-    except Exception:
-
-        return
-
-    if price <= 0:
-
-        return
-
-    if price > PRICE_LIMIT_RUB:
-
-        return
-
-    transfers = item.get(
-        "transfers"
-    )
-
-    return_transfers = item.get(
-        "return_transfers"
-    )
-
-    if transfers is None:
-
-        transfers = 0
-
-    if return_transfers is None:
-
-        return_transfers = 0
-
-    try:
-
-        transfers = int(
-            transfers
-        )
-
-    except Exception:
-
-        transfers = 99
-
-    try:
-
-        return_transfers = int(
-            return_transfers
-        )
-
-    except Exception:
-
-        return_transfers = 99
-
-    # Не принимаем варианты
-    # с более чем одной пересадкой
-    if transfers > 1:
-
-        return
-
-    if return_transfers > 1:
-
-        return
-
-    airline = str(
-        item.get(
-            "airline",
-            ""
-        )
-    )
-
-    flight_number = str(
-        item.get(
-            "flight_number",
-            ""
-        )
-    )
-
-    origin_airport = str(
-        item.get(
-            "origin_airport",
-            airport
-        )
-    )
-
-    destination_airport = str(
-        item.get(
-            "destination_airport",
-            destination_code
-        )
-    )
-
-    link = str(
-        item.get(
-            "link",
-            ""
-        )
-    )
-
-    results.append({
-
-        "source":
-            "Aviasales",
-
-        "outbound":
-            outbound,
-
-        "return":
-            return_date,
-
-        "airport":
-            origin_airport,
-
-        "destination":
-            destination_code,
-
-        "destination_name":
-            DESTINATIONS[
-                destination_code
-            ],
-
-        "price":
-            price,
-
-        "airlines":
-            airline,
-
-        "segments": [
-            {
-                "airline":
-                    airline,
-
-                "number":
-                    flight_number,
-
-                "departure":
-                    str(
-                        item.get(
-                            "departure_at",
-                            ""
-                        )
-                    ),
-
-                "arrival":
-                    str(
-                        item.get(
-                            "return_at",
-                            ""
-                        )
-                    ),
-
-                "duration":
-                    str(
-                        item.get(
-                            "duration",
-                            ""
-                        )
-                    ),
-            }
-        ],
-
-        "transfers":
-            transfers,
-
-        "return_transfers":
-            return_transfers,
-
-        "link":
-            link,
-
-        "origin_airport":
-            origin_airport,
-
-        "destination_airport":
-            destination_airport,
-    })
-
-
-# ============================================================
-# ОБЩИЙ ПОИСК
-# ============================================================
-
-def search_all(
-    results,
-    errors,
-):
-
-    total_searches = 0
-
-    successful_searches = 0
-
-    aviasales_successes = 0
-
-    aviasales_errors = 0
-
-    print(
-        "================================"
-    )
-
-    print(
-        "GENERAL FLIGHT SEARCH"
-    )
-
-    print(
-        "Google Flights + Aviasales"
-    )
-
-    print(
-        "================================"
-    )
-
-    for outbound in OUTBOUND_DATES:
-
-        for return_date in RETURN_DATES:
-
-            for airport in MOSCOW_AIRPORTS:
-
-                for destination_code in DESTINATIONS:
-
-                    total_searches += 1
-
-                    print(
-                        f"\nSEARCH "
-                        f"{total_searches}: "
-                        f"{airport}->"
-                        f"{destination_code} "
-                        f"{outbound}->"
-                        f"{return_date}"
-                    )
-
-                    # ----------------------------------------
-                    # GOOGLE
-                    # ----------------------------------------
-
-                    try:
-
-                        flights = (
-                            search_google_flights(
-                                outbound,
-                                return_date,
-                                airport,
-                                destination_code,
-                            )
-                        )
-
-                        successful_searches += 1
-
-                        print(
-                            "Google results:",
-                            len(flights)
-                        )
-
-                        for flight in flights:
-
-                            add_google_result(
-                                results,
-                                outbound,
-                                return_date,
-                                airport,
-                                destination_code,
-                                flight,
-                            )
-
-                    except Exception as error:
-
-                        error_text = (
-                            "Google | "
-                            f"{airport}->"
-                            f"{destination_code} "
-                            f"{outbound}->"
-                            f"{return_date}: "
-                            f"{type(error).__name__}: "
-                            f"{error}"
-                        )
-
-                        print(
-                            "GOOGLE ERROR:",
-                            error_text
-                        )
-
-                        errors.append(
-                            error_text
-                        )
-
-                    # ----------------------------------------
-                    # AVIASALES
-                    # ----------------------------------------
-
-                    try:
-
-                        aviasales_items = (
-                            search_aviasales(
-                                outbound,
-                                return_date,
-                                airport,
-                                destination_code,
-                            )
-                        )
-
-                        aviasales_successes += 1
-
-                        print(
-                            "Aviasales results:",
-                            len(
-                                aviasales_items
-                            )
-                        )
-
-                        for item in (
-                            aviasales_items
-                        ):
-
-                            add_aviasales_result(
-                                results,
-                                outbound,
-                                return_date,
-                                airport,
-                                destination_code,
-                                item,
-                            )
-
-                    except Exception as error:
-
-                        aviasales_errors += 1
-
-                        error_text = (
-                            "Aviasales | "
-                            f"{airport}->"
-                            f"{destination_code} "
-                            f"{outbound}->"
-                            f"{return_date}: "
-                            f"{type(error).__name__}: "
-                            f"{error}"
-                        )
-
-                        print(
-                            "AVIASALES ERROR:",
-                            error_text
-                        )
-
-                        errors.append(
-                            error_text
-                        )
-
-    return (
-        total_searches,
-        successful_searches,
-        aviasales_successes,
-        aviasales_errors,
-    )
-
-
-# ============================================================
-# ДУБЛИКАТЫ
-# ============================================================
-
-def remove_duplicates(results):
-
-    unique = []
-
-    seen = set()
-
-    for item in results:
-
-        key = (
-            item.get(
-                "source",
-                ""
-            ),
-
-            item.get(
-                "outbound",
-                ""
-            ),
-
-            item.get(
-                "return",
-                ""
-            ),
-
-            item.get(
-                "airport",
-                ""
-            ),
-
-            item.get(
-                "destination",
-                ""
-            ),
-
-            item.get(
-                "price",
-                0
-            ),
-
-            item.get(
-                "airlines",
-                ""
-            ),
-        )
-
-        if key in seen:
-
-            continue
-
-        seen.add(key)
-
-        unique.append(item)
-
-    return unique
-
-
-# ============================================================
-# КЛЮЧ ВАРИАНТА
-# ============================================================
-
-def make_key(item):
-
-    return (
-        f"{item.get('source', '')}|"
-        f"{item['outbound']}|"
-        f"{item['return']}|"
-        f"{item['airport']}|"
-        f"{item['destination']}|"
-        f"{item['airlines']}"
-    )
-
-
-# ============================================================
-# ФОРМАТИРОВАНИЕ
-# ============================================================
-
-def format_rub(price):
-
-    return (
-        f"{price:,}"
-        .replace(",", " ")
-        + " ₽"
-    )
-
-
-def format_usd(price):
-
-    usd = (
-        price / RUB_PER_USD
-    )
-
-    return (
-        f"${usd:,.0f}"
-        .replace(",", " ")
-    )
-
-
-# ============================================================
-# ТЕКСТ РЕЙСА
-# ============================================================
-
-def build_flight_text(item):
-
-    text = ""
-
-    for segment in item.get(
-        "segments",
-        []
-    ):
-
-        airline = segment.get(
-            "airline",
-            ""
-        )
-
-        number = segment.get(
-            "number",
-            ""
-        )
-
-        departure = segment.get(
-            "departure",
-            ""
-        )
-
-        arrival = segment.get(
-            "arrival",
-            ""
-        )
-
-        text += airline
-
-        if number:
-
-            text += (
-                f" {number}"
-            )
-
-        text += (
-            f": {departure} → "
-            f"{arrival}\n"
-        )
-
-    return text
-
-
-# ============================================================
-# ПОЛНОЕ СООБЩЕНИЕ О БИЛЕТЕ
-# ============================================================
-
-def build_flight_message(item):
-
-    message = (
-        "✈️ Найден билет\n\n"
-
-        f"🔎 Источник: "
-        f"{item.get('source', '')}\n\n"
-
-        f"💰 "
-        f"{format_rub(item['price'])} "
-        f"({format_usd(item['price'])})\n"
-
-        f"📅 {item['outbound']} → "
-        f"{item['return']}\n"
-
-        f"🛫 {item['airport']}\n"
-
-        f"🛬 "
-        f"{item['destination_name']} "
-        f"({item['destination']})\n"
-
-        f"✈️ {item['airlines']}\n\n"
-    )
-
-    flight_text = (
-        build_flight_text(item)
-    )
-
-    if flight_text:
-
-        message += flight_text
-
-    transfers = item.get(
-        "transfers"
-    )
-
-    return_transfers = item.get(
-        "return_transfers"
-    )
-
-    if transfers is not None:
-
-        message += (
-            "\n🔄 Пересадки: "
-            f"{transfers} / "
-            f"{return_transfers}\n"
-        )
-
-    link = item.get(
-        "link",
-        ""
-    )
-
-    if link:
-
-        message += (
-            "\n🔗 Aviasales:\n"
-            f"https://www.aviasales.ru/"
-            f"search/{link}\n"
-        )
-
-    message += (
-        "\n🎯 Лимит: "
-        f"{format_rub(PRICE_LIMIT_RUB)} "
-        f"(≈ {format_usd(PRICE_LIMIT_RUB)})\n\n"
-
-        f"Источник данных: "
-        f"{item.get('source', '')}."
-    )
-
-    return message
-
-
-# ============================================================
-# СВОДКА
-# ============================================================
-
-def build_run_summary(
-    results,
-    errors,
-    total_searches,
-    successful_searches,
-    aviasales_successes,
-    aviasales_errors,
-    new_count,
-    cheaper_count,
-):
-
-    google_results = [
-        item
-        for item in results
-        if item.get("source")
-        == "Google Flights"
-    ]
-
-    aviasales_results = [
-        item
-        for item in results
-        if item.get("source")
-        == "Aviasales"
-    ]
-
-    message = (
-        "🔎 Maxim Flight Monitor\n\n"
-
-        "Запуск завершён.\n\n"
-
-        "📅 Вылет:\n"
-        "26 или 27 декабря 2026\n\n"
-
-        "📅 Возврат:\n"
-        "9, 10 или 11 января 2027\n\n"
-
-        "🛫 Москва: SVO / DME / VKO\n"
-        "🛬 BKK / UTP\n"
-        "👤 1 взрослый\n"
-        "💺 Economy\n"
-        "🔄 Максимум 1 пересадка\n\n"
-
-        "━━━━━━━━━━━━━━━━━━\n"
-
-        "🔎 GOOGLE FLIGHTS\n"
-
-        "━━━━━━━━━━━━━━━━━━\n"
-
-        f"Поисков: "
-        f"{total_searches}\n"
-
-        f"Успешно: "
-        f"{successful_searches}\n"
-
-        f"Ошибок: "
-        f"{total_searches - successful_searches}\n"
-
-        f"Вариантов ≤ "
-        f"{format_rub(PRICE_LIMIT_RUB)}: "
-        f"{len(google_results)}\n\n"
-
-        "━━━━━━━━━━━━━━━━━━\n"
-
-        "🔎 AVIASALES\n"
-
-        "━━━━━━━━━━━━━━━━━━\n"
-
-        f"Поисков: "
-        f"{total_searches}\n"
-
-        f"Успешно: "
-        f"{aviasales_successes}\n"
-
-        f"Ошибок: "
-        f"{aviasales_errors}\n"
-
-        f"Вариантов ≤ "
-        f"{format_rub(PRICE_LIMIT_RUB)}: "
-        f"{len(aviasales_results)}\n\n"
-    )
-
-    if results:
-
-        message += (
-            "💰 ЛУЧШИЕ ВАРИАНТЫ\n\n"
-        )
-
-        for index, item in enumerate(
-            sorted(
-                results,
-                key=lambda x:
-                    x["price"]
-            )[:10],
-            start=1,
-        ):
-
-            message += (
-                f"{index}. "
-                f"{format_rub(item['price'])} "
-                f"({format_usd(item['price'])})\n"
-
-                f"   🔎 "
-                f"{item.get('source', '')}\n"
-
-                f"   📅 "
-                f"{item['outbound']} → "
-                f"{item['return']}\n"
-
-                f"   🛫 "
-                f"{item['airport']} → "
-                f"{item['destination']}\n"
-
-                f"   ✈️ "
-                f"{item['airlines']}\n\n"
-            )
+    elif isinstance(raw_data, list):
+        records.extend(raw_data)
 
     else:
+        return []
 
-        message += (
-            f"❌ Билетов дешевле "
-            f"{format_rub(PRICE_LIMIT_RUB)} "
-            "не найдено.\n\n"
+    normalized = []
+
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+
+        price = safe_float(
+            item.get("price")
         )
 
-    message += (
-        f"🆕 Новых вариантов: "
-        f"{new_count}\n"
+        if price is None:
+            continue
 
-        f"📉 Снижения цены: "
-        f"{cheaper_count}\n"
+        found_departure = item.get(
+            "departure_at"
+        )
+
+        found_return = item.get(
+            "return_at"
+        )
+
+        transfers = normalize_stops(
+            item.get("transfers")
+        )
+
+        return_transfers = normalize_stops(
+            item.get("return_transfers")
+        )
+
+        normalized.append(
+            {
+                "source": "Aviasales",
+                "origin": item.get(
+                    "origin_airport"
+                )
+                or origin,
+                "destination": item.get(
+                    "destination_airport"
+                )
+                or destination,
+                "price": price,
+                "airline": item.get(
+                    "airline"
+                )
+                or "",
+                "flight_number": item.get(
+                    "flight_number"
+                )
+                or "",
+                "departure": found_departure
+                or departure_date,
+                "return": found_return
+                or return_date,
+                "duration": item.get(
+                    "duration"
+                ),
+                "duration_to": item.get(
+                    "duration_to"
+                ),
+                "duration_back": item.get(
+                    "duration_back"
+                ),
+                "stops": transfers,
+                "return_stops": return_transfers,
+                "link": item.get("link")
+                or "",
+            }
+        )
+
+    normalized.sort(
+        key=lambda x: x["price"]
     )
 
-    if errors:
+    return normalized
 
-        message += (
-            "\n⚠️ ОШИБКИ ПОИСКА\n\n"
-        )
 
-        for index, error in enumerate(
-            errors,
-            start=1,
-        ):
+# ============================================================
+# URL
+# ============================================================
 
-            message += (
-                f"{index}. "
-                f"{error}\n"
+def aviasales_link(relative_link):
+    if not relative_link:
+        return ""
+
+    if relative_link.startswith("http"):
+        return relative_link
+
+    return (
+        "https://www.aviasales.ru"
+        + relative_link
+    )
+
+
+# ============================================================
+# SEARCH ONE COMBINATION
+# ============================================================
+
+def run_one_search(
+    source,
+    origin,
+    destination,
+    departure_date,
+    return_date,
+):
+    """
+    Возвращает:
+      {
+        results: [...]
+        error: None / string
+        status: ...
+      }
+    """
+
+    try:
+        if source == "Google":
+            raw = search_google(
+                origin=origin,
+                destination=destination,
+                departure_date=departure_date,
+                return_date=return_date,
             )
 
-    return message
+            results = normalize_google_results(
+                raw,
+                origin,
+                destination,
+            )
+
+        elif source == "Aviasales":
+            raw = search_aviasales(
+                origin=origin,
+                destination=destination,
+                departure_date=departure_date,
+                return_date=return_date,
+            )
+
+            results = normalize_aviasales_results(
+                raw,
+                origin,
+                destination,
+                departure_date,
+                return_date,
+            )
+
+        else:
+            raise RuntimeError(
+                f"Unknown source: {source}"
+            )
+
+        return {
+            "results": results,
+            "error": None,
+        }
+
+    except Exception as exc:
+        return {
+            "results": [],
+            "error": (
+                f"{type(exc).__name__}: {exc}"
+            ),
+        }
+
+
+# ============================================================
+# RESULT PROCESSING
+# ============================================================
+
+def best_result(results):
+    if not results:
+        return None
+
+    return min(
+        results,
+        key=lambda x: x.get("price", float("inf")),
+    )
+
+
+def filter_max_one_stop(results):
+    """
+    Оставляем варианты, где:
+      туда <= 1 пересадки
+      обратно <= 1 пересадки
+
+    Если источник не сообщил число пересадок,
+    результат НЕ считаем автоматически подходящим.
+    """
+
+    output = []
+
+    for result in results:
+        stops = result.get("stops")
+        return_stops = result.get("return_stops")
+
+        if stops is None:
+            # Для Google иногда fast-flights не даёт поле.
+            # В этом случае пытаемся принять результат,
+            # если строка stops отсутствует только у Google.
+            if result.get("source") == "Google":
+                output.append(result)
+            continue
+
+        if stops > 1:
+            continue
+
+        if return_stops is not None and return_stops > 1:
+            continue
+
+        output.append(result)
+
+    return output
+
+
+def update_history(state, result):
+    key = make_key(
+        result["source"],
+        result["origin"],
+        result["destination"],
+        result.get("departure"),
+        result.get("return")
+        or "",
+    )
+
+    old_price = state.get(key)
+
+    state[key] = {
+        "price": result["price"],
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    return old_price
+
+
+# ============================================================
+# TELEGRAM FORMATTING
+# ============================================================
+
+def format_result(result):
+    source = result.get("source", "")
+    origin = result.get("origin", "")
+    destination = result.get("destination", "")
+    price = result.get("price")
+
+    airline = result.get("airline") or ""
+
+    flight_number = result.get(
+        "flight_number"
+    ) or ""
+
+    departure = result.get(
+        "departure"
+    ) or ""
+
+    return_date = result.get(
+        "return"
+    ) or ""
+
+    stops = result.get("stops")
+    return_stops = result.get("return_stops")
+
+    parts = [
+        f"💰 {fmt_price(price)}",
+        f"🛫 {origin} → {destination}",
+        f"📅 {departure}",
+    ]
+
+    if return_date:
+        parts.append(
+            f"↩️ {return_date}"
+        )
+
+    if airline:
+        airline_text = airline
+
+        if flight_number:
+            airline_text += (
+                f" {flight_number}"
+            )
+
+        parts.append(
+            f"✈️ {airline_text}"
+        )
+
+    if stops is not None:
+        if return_stops is not None:
+            parts.append(
+                f"🔄 {stops}/{return_stops} перес."
+            )
+        else:
+            parts.append(
+                f"🔄 {stops} перес."
+            )
+
+    duration = result.get(
+        "duration"
+    )
+
+    if duration:
+        parts.append(
+            f"⏱ {duration}"
+        )
+
+    link = result.get("link") or ""
+
+    if source == "Aviasales":
+        link = aviasales_link(link)
+
+    if link:
+        parts.append(
+            f"🔗 {link}"
+        )
+
+    return (
+        f"🔎 {source}\n"
+        + "\n".join(parts)
+    )
 
 
 # ============================================================
@@ -1275,228 +769,379 @@ def build_run_summary(
 # ============================================================
 
 def main():
-
-    print(
-        "================================"
-    )
-
-    print(
-        "FLIGHT MONITOR START"
-    )
-
-    print(
-        "================================"
-    )
-
-    print(
-        f"Price limit: "
-        f"{PRICE_LIMIT_RUB} RUB"
-    )
-
-    print(
-        f"Approx USD limit: "
-        f"${PRICE_LIMIT_USD:.0f}"
-    )
-
-    print(
-        f"RUB/USD rate: "
-        f"{RUB_PER_USD}"
-    )
-
-    if AVIASALES_TOKEN:
-
-        print(
-            "Aviasales API: CONFIGURED"
-        )
-
-    else:
-
-        print(
-            "Aviasales API: "
-            "NOT CONFIGURED"
-        )
-
     state = load_state()
 
-    all_results = []
+    google_searches = 0
+    google_successes = 0
+    google_errors = 0
+    google_empty = 0
+
+    aviasales_searches = 0
+    aviasales_successes = 0
+    aviasales_errors = 0
+    aviasales_empty = 0
+
+    google_results = []
+    aviasales_results = []
 
     errors = []
 
-    try:
+    # --------------------------------------------------------
+    # GOOGLE
+    # --------------------------------------------------------
 
-        (
-            total_searches,
-            successful_searches,
-            aviasales_successes,
-            aviasales_errors,
-        ) = search_all(
-            all_results,
-            errors,
-        )
+    for departure_date in DEPARTURE_DATES:
+        for return_date in RETURN_DATES:
+            for origin in ORIGIN_AIRPORTS:
+                for destination in DESTINATIONS:
 
-    except Exception as error:
+                    google_searches += 1
 
-        error_text = (
-            f"{type(error).__name__}: "
-            f"{error}"
-        )
+                    result = run_one_search(
+                        "Google",
+                        origin,
+                        destination,
+                        departure_date,
+                        return_date,
+                    )
 
-        errors.append(
-            error_text
-        )
+                    if result["error"]:
+                        google_errors += 1
 
-        print(
-            "FATAL SEARCH ERROR:",
-            error_text,
-        )
+                        errors.append(
+                            (
+                                "Google",
+                                origin,
+                                destination,
+                                departure_date,
+                                return_date,
+                                result["error"],
+                            )
+                        )
 
-        traceback.print_exc()
+                        continue
 
-        total_searches = 0
+                    google_successes += 1
 
-        successful_searches = 0
+                    if not result["results"]:
+                        google_empty += 1
+                    else:
+                        google_results.extend(
+                            result["results"]
+                        )
 
-        aviasales_successes = 0
+    # --------------------------------------------------------
+    # AVIASALES
+    # --------------------------------------------------------
 
-        aviasales_errors = 0
+    for departure_date in DEPARTURE_DATES:
+        for return_date in RETURN_DATES:
+            for origin in ORIGIN_AIRPORTS:
+                for destination in DESTINATIONS:
 
-    print(
-        "Raw results:",
-        len(all_results)
+                    aviasales_searches += 1
+
+                    result = run_one_search(
+                        "Aviasales",
+                        origin,
+                        destination,
+                        departure_date,
+                        return_date,
+                    )
+
+                    if result["error"]:
+                        aviasales_errors += 1
+
+                        errors.append(
+                            (
+                                "Aviasales",
+                                origin,
+                                destination,
+                                departure_date,
+                                return_date,
+                                result["error"],
+                            )
+                        )
+
+                        continue
+
+                    aviasales_successes += 1
+
+                    if not result["results"]:
+                        aviasales_empty += 1
+                    else:
+                        aviasales_results.extend(
+                            result["results"]
+                        )
+
+    # --------------------------------------------------------
+    # FILTER
+    # --------------------------------------------------------
+
+    google_filtered = filter_max_one_stop(
+        google_results
+    )
+
+    aviasales_filtered = filter_max_one_stop(
+        aviasales_results
     )
 
     all_results = (
-        remove_duplicates(
-            all_results
-        )
+        google_filtered
+        + aviasales_filtered
     )
 
     all_results.sort(
-        key=lambda item:
-            item["price"]
+        key=lambda x: x.get(
+            "price",
+            float("inf"),
+        )
     )
 
-    print(
-        "Unique results:",
-        len(all_results)
+    cheap_results = [
+        result
+        for result in all_results
+        if result.get("price", float("inf"))
+        <= PRICE_LIMIT
+    ]
+
+    google_best = best_result(
+        google_filtered
     )
 
-    # ========================================================
-    # ОБНОВЛЕНИЕ СОСТОЯНИЯ
-    # ========================================================
+    aviasales_best = best_result(
+        aviasales_filtered
+    )
+
+    # --------------------------------------------------------
+    # HISTORY
+    # --------------------------------------------------------
 
     new_count = 0
+    price_drop_count = 0
 
-    cheaper_count = 0
-
-    for item in all_results:
-
-        key = make_key(item)
-
-        new_price = item["price"]
-
-        old_price = state.get(
-            key
+    for result in all_results:
+        old_price = update_history(
+            state,
+            result,
         )
 
         if old_price is None:
-
             new_count += 1
 
-            state[key] = new_price
-
-            continue
-
-        if new_price < old_price:
-
-            cheaper_count += 1
-
-            state[key] = new_price
-
-        elif new_price > old_price:
-
-            state[key] = new_price
-
-    # ========================================================
-    # СОХРАНЕНИЕ
-    # ========================================================
+        elif result["price"] < old_price:
+            price_drop_count += 1
 
     save_state(state)
 
-    # ========================================================
-    # TELEGRAM SUMMARY
-    # ========================================================
+    # --------------------------------------------------------
+    # SUMMARY
+    # --------------------------------------------------------
 
-    summary = build_run_summary(
-        all_results,
-        errors,
-        total_searches,
-        successful_searches,
-        aviasales_successes,
-        aviasales_errors,
-        new_count,
-        cheaper_count,
-    )
+    lines = [
+        "Maxim Flight Monitor",
+        "",
+        "Запуск завершён.",
+        "",
+        "📅 Вылет:",
+        "26 или 27 декабря 2026",
+        "",
+        "📅 Возврат:",
+        "9, 10 или 11 января 2027",
+        "",
+        "🛫 Москва: SVO / DME / VKO",
+        "🛬 BKK / UTP",
+        "👤 1 взрослый",
+        "💺 Economy",
+        "🔄 Максимум 1 пересадка",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "🔎 GOOGLE FLIGHTS",
+        "━━━━━━━━━━━━━━━━━━",
+        f"Поисков: {google_searches}",
+        f"Ответов без ошибки: {google_successes}",
+        f"Технических ошибок: {google_errors}",
+        f"Пустых результатов: {google_empty}",
+        f"Результатов ≤ {PRICE_LIMIT:,.0f} ₽: "
+        f"{sum(1 for x in google_filtered if x.get('price', 10**18) <= PRICE_LIMIT)}"
+        .replace(",", " "),
+    ]
 
-    send_telegram(
-        summary
-    )
-
-    # ========================================================
-    # ОТДЕЛЬНЫЕ СООБЩЕНИЯ О ЛУЧШИХ ВАРИАНТАХ
-    # ========================================================
-
-    for item in all_results[:5]:
-
-        send_telegram(
-            build_flight_message(
-                item
-            )
+    if google_best:
+        lines.extend(
+            [
+                f"💵 Минимальная найденная цена: "
+                f"{fmt_price(google_best['price'])}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "💵 Минимальная найденная цена: нет данных",
+                "",
+            ]
         )
 
-    print(
-        "================================"
+    lines.extend(
+        [
+            "━━━━━━━━━━━━━━━━━━",
+            "🔎 AVIASALES",
+            "━━━━━━━━━━━━━━━━━━",
+            f"Поисков: {aviasales_searches}",
+            f"Ответов без ошибки: {aviasales_successes}",
+            f"Технических ошибок: {aviasales_errors}",
+            f"Пустых результатов: {aviasales_empty}",
+            f"Результатов ≤ {PRICE_LIMIT:,.0f} ₽: "
+            f"{sum(1 for x in aviasales_filtered if x.get('price', 10**18) <= PRICE_LIMIT)}"
+            .replace(",", " "),
+        ]
     )
 
-    print(
-        "FLIGHT MONITOR FINISHED"
+    if aviasales_best:
+        lines.extend(
+            [
+                f"💵 Минимальная найденная цена: "
+                f"{fmt_price(aviasales_best['price'])}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "💵 Минимальная найденная цена: нет данных",
+                "",
+            ]
+        )
+
+    # --------------------------------------------------------
+    # GLOBAL STATUS
+    # --------------------------------------------------------
+
+    if cheap_results:
+        lines.extend(
+            [
+                "🎯 Найдены варианты ≤ "
+                f"{fmt_price(PRICE_LIMIT)}:",
+                str(len(cheap_results)),
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"❌ Вариантов ≤ {fmt_price(PRICE_LIMIT)} не найдено.",
+            ]
+        )
+
+    if all_results:
+        lines.extend(
+            [
+                "",
+                f"📊 Всего найдено подходящих вариантов: "
+                f"{len(all_results)}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            f"🆕 Новых вариантов: {new_count}",
+            f"📉 Снижений цены: {price_drop_count}",
+        ]
     )
 
-    print(
-        f"Notifications: "
-        f"{1 + min(5, len(all_results))}"
-    )
+    # --------------------------------------------------------
+    # ERRORS
+    # --------------------------------------------------------
 
-    print(
-        "================================"
-    )
+    if errors:
+        lines.extend(
+            [
+                "",
+                "⚠️ ТЕХНИЧЕСКИЕ ОШИБКИ",
+            ]
+        )
 
+        max_error_lines = 15
 
-# ============================================================
-# ЗАПУСК
-# ============================================================
+        for index, error in enumerate(
+            errors[:max_error_lines],
+            start=1,
+        ):
+            (
+                source,
+                origin,
+                destination,
+                departure_date,
+                return_date,
+                message,
+            ) = error
+
+            lines.append(
+                f"{index}. {source} | "
+                f"{origin}->{destination} "
+                f"{departure_date}->{return_date}: "
+                f"{message}"
+            )
+
+        if len(errors) > max_error_lines:
+            lines.append(
+                f"... и ещё {len(errors) - max_error_lines}"
+            )
+
+    # --------------------------------------------------------
+    # EXPLANATION WHEN AVIASALES EMPTY
+    # --------------------------------------------------------
+
+    if (
+        aviasales_successes > 0
+        and aviasales_empty > 0
+    ):
+        lines.extend(
+            [
+                "",
+                "ℹ️ Aviasales отвечает корректно, "
+                "но для части запросов сейчас нет "
+                "цен в его кеше за последние 48 часов.",
+            ]
+        )
+
+    summary = "\n".join(lines)
+
+    telegram_send(summary)
+
+    # --------------------------------------------------------
+    # BEST RESULTS
+    # --------------------------------------------------------
+
+    sent = 0
+
+    for result in all_results[:5]:
+        text = format_result(result)
+
+        telegram_send(text)
+
+        sent += 1
+
+    print(summary)
+
+    for result in all_results[:5]:
+        print(
+            "\n" + format_result(result)
+        )
+
 
 if __name__ == "__main__":
-
     try:
-
         main()
 
-    except Exception as error:
-
-        print(
-            "FATAL ERROR:",
-            type(error).__name__,
-            str(error),
+    except Exception as exc:
+        error_text = (
+            "🚨 Maxim Flight Monitor — КРИТИЧЕСКАЯ ОШИБКА\n\n"
+            f"{type(exc).__name__}: {exc}\n\n"
+            f"{traceback.format_exc()[-3000:]}"
         )
 
-        traceback.print_exc()
-
-        send_telegram(
-            "🚨 Maxim Flight Monitor\n\n"
-            "КРИТИЧЕСКАЯ ОШИБКА.\n\n"
-            f"{type(error).__name__}: "
-            f"{error}"
-        )
+        telegram_send(error_text)
 
         raise
