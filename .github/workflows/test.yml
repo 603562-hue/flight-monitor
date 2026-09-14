@@ -5,14 +5,28 @@ on:
   schedule:
     - cron: "0 */2 * * *"
 
+# Не допускаем два одновременных запуска,
+# иначе два процесса могут работать с разными версиями state.
+concurrency:
+  group: flight-monitor-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -24,14 +38,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install fast-flights==3.1.0 typing_extensions requests
 
+      # ======================================================
+      # RESTORE PRICE HISTORY
+      # ======================================================
+
       - name: Restore price history
+        id: restore-state
         uses: actions/cache/restore@v5
         with:
           path: flight_state.json
+
+          # Каждый запуск получает новый cache key,
+          # потому что GitHub не позволяет изменять существующий.
           key: flight-monitor-state-${{ github.ref_name }}-${{ github.run_id }}
+
+          # При отсутствии точного ключа берём самый свежий
+          # предыдущий state этой ветки.
           restore-keys: |
             flight-monitor-state-${{ github.ref_name }}-
             flight-monitor-state-
+
+      # ======================================================
+      # RUN MONITOR
+      # ======================================================
 
       - name: Run Flight Monitor
         env:
@@ -41,7 +70,12 @@ jobs:
         run: |
           python flight_monitor.py
 
+      # ======================================================
+      # SAVE UPDATED PRICE HISTORY
+      # ======================================================
+
       - name: Save price history
+        if: success()
         uses: actions/cache/save@v5
         with:
           path: flight_state.json
