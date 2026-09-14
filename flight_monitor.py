@@ -1,7 +1,7 @@
 import json
 import os
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -71,6 +71,12 @@ AVIASALES_API_URL = (
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
+def now_utc_iso():
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
+
+
 def to_float(value):
     try:
         if value is None:
@@ -80,6 +86,7 @@ def to_float(value):
             return float(value)
 
         text = str(value).strip()
+
         text = (
             text.replace("₽", "")
             .replace("RUB", "")
@@ -94,13 +101,13 @@ def to_float(value):
 
 
 def format_price(value):
-    value = to_float(value)
+    number = to_float(value)
 
-    if value is None:
+    if number is None:
         return "—"
 
     return (
-        f"{value:,.0f}"
+        f"{number:,.0f}"
         .replace(",", " ")
         + " ₽"
     )
@@ -117,10 +124,13 @@ def load_state():
         ) as file:
             data = json.load(file)
 
-        return data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            return data
 
     except Exception:
-        return {}
+        pass
+
+    return {}
 
 
 def save_state(state):
@@ -162,6 +172,7 @@ def telegram_send(text):
         )
 
         response.raise_for_status()
+
         return True
 
     except Exception:
@@ -179,12 +190,14 @@ def search_google(
     return_date,
 ):
     """
-    Поиск round-trip через fast-flights 3.1.0.
+    Рабочая схема round-trip для текущего fast-flights:
 
-    ВАЖНО:
-    fast-flights 3.1.0 умеет создавать round-trip query
-    напрямую через create_query(..., trip="round-trip"),
-    поэтому никакие get_return_flights здесь не используются.
+    один create_query() с двумя FlightQuery
+    и trip="round-trip".
+
+    Никаких get_return_flights / select_flight здесь
+    не используем, поскольку именно этот вариант уже
+    успешно отработал в текущем проекте.
     """
 
     query = create_query(
@@ -214,8 +227,63 @@ def search_google(
     return list(results)
 
 
+def get_segment_airport_code(segment, attribute):
+    """
+    Пытаемся достать код аэропорта из сегмента
+    максимально безопасно.
+    """
+
+    try:
+        airport = getattr(
+            segment,
+            attribute,
+            None,
+        )
+
+        if airport is None:
+            return ""
+
+        code = getattr(
+            airport,
+            "code",
+            None,
+        )
+
+        return str(code or "")
+
+    except Exception:
+        return ""
+
+
+def get_flight_segments(flight):
+    try:
+        segments = getattr(
+            flight,
+            "flights",
+            [],
+        )
+
+        if segments is None:
+            return []
+
+        return list(segments)
+
+    except Exception:
+        return []
+
+
+def count_stops(segments):
+    if not segments:
+        return None
+
+    return max(
+        len(segments) - 1,
+        0,
+    )
+
+
 def normalize_google_results(
-    results,
+    raw_results,
     origin,
     destination,
     departure_date,
@@ -223,7 +291,7 @@ def normalize_google_results(
 ):
     normalized = []
 
-    for flight in results:
+    for flight in raw_results:
         try:
             price = to_float(
                 getattr(
@@ -236,82 +304,8 @@ def normalize_google_results(
             if price is None:
                 continue
 
-            segments = list(
-                getattr(
-                    flight,
-                    "flights",
-                    [],
-                )
-            )
-
-            if not segments:
-                continue
-
-            # Для round-trip Google обычно возвращает
-            # все сегменты обоих плеч в одном результате.
-            #
-            # Поэтому всего сегментов - 2 = пересадки
-            # для двух прямых плеч.
-            #
-            # Если 4 сегмента:
-            # 2 туда + 2 обратно = по одной пересадке.
-            #
-            # Чтобы не считать маршрут ошибочно,
-            # определяем пересадки отдельно по направлению.
-
-            outbound_segments = []
-            return_segments = []
-
-            outbound_done = False
-
-            for segment in segments:
-                from_code = getattr(
-                    getattr(
-                        segment,
-                        "from_airport",
-                        None,
-                    ),
-                    "code",
-                    "",
-                )
-
-                to_code = getattr(
-                    getattr(
-                        segment,
-                        "to_airport",
-                        None,
-                    ),
-                    "code",
-                    "",
-                )
-
-                if not outbound_done:
-                    outbound_segments.append(
-                        segment
-                    )
-
-                    if to_code == destination:
-                        outbound_done = True
-
-                else:
-                    return_segments.append(
-                        segment
-                    )
-
-            # Защита от странного результата parser'а.
-            if not return_segments and len(segments) >= 2:
-                half = len(segments) // 2
-                outbound_segments = segments[:half]
-                return_segments = segments[half:]
-
-            outbound_stops = max(
-                len(outbound_segments) - 1,
-                0,
-            )
-
-            return_stops = max(
-                len(return_segments) - 1,
-                0,
+            segments = get_flight_segments(
+                flight
             )
 
             airlines = getattr(
@@ -324,51 +318,57 @@ def normalize_google_results(
                 airlines = []
 
             airlines = [
-                str(x)
-                for x in airlines
+                str(item)
+                for item in airlines
             ]
 
-            first_segment = segments[0]
-            last_segment = segments[-1]
+            outbound_segments = []
+            return_segments = []
 
-            departure_time = getattr(
-                getattr(
-                    first_segment,
-                    "departure",
-                    None,
-                ),
-                "time",
-                None,
+            outbound_finished = False
+
+            for segment in segments:
+                to_code = get_segment_airport_code(
+                    segment,
+                    "to_airport",
+                )
+
+                if not outbound_finished:
+                    outbound_segments.append(
+                        segment
+                    )
+
+                    if to_code == destination:
+                        outbound_finished = True
+                else:
+                    return_segments.append(
+                        segment
+                    )
+
+            # Если parser Google не позволил
+            # нормально разделить плечи,
+            # используем вторую попытку:
+            if (
+                not outbound_segments
+                or not return_segments
+            ):
+                if len(segments) >= 2:
+                    midpoint = len(segments) // 2
+
+                    outbound_segments = (
+                        segments[:midpoint]
+                    )
+
+                    return_segments = (
+                        segments[midpoint:]
+                    )
+
+            outbound_stops = count_stops(
+                outbound_segments
             )
 
-            arrival_time = getattr(
-                getattr(
-                    outbound_segments[-1],
-                    "arrival",
-                    None,
-                ),
-                "time",
-                None,
-            )
-
-            return_departure_time = getattr(
-                getattr(
-                    return_segments[0],
-                    "departure",
-                    None,
-                ),
-                "time",
-                None,
-            ) if return_segments else None
-
-            return_arrival_time = getattr(
-                getattr(
-                    last_segment,
-                    "arrival",
-                    None,
-                ),
-                "time",
-                None,
+            return_stops = count_stops(
+                return_segments
             )
 
             normalized.append(
@@ -382,28 +382,16 @@ def normalize_google_results(
                     "airlines": airlines,
                     "outbound_stops": outbound_stops,
                     "return_stops": return_stops,
-                    "departure_time": departure_time,
-                    "arrival_time": arrival_time,
-                    "return_departure_time": return_departure_time,
-                    "return_arrival_time": return_arrival_time,
-                    "duration_minutes": sum(
-                        getattr(
-                            segment,
-                            "duration",
-                            0,
-                        )
-                        or 0
-                        for segment in segments
-                    ),
                 }
             )
 
         except Exception:
-            # Не ломаем весь поиск из-за одного кривого результата.
+            # Один плохой результат Google
+            # не должен ломать весь запрос.
             continue
 
     normalized.sort(
-        key=lambda x: x["price"]
+        key=lambda item: item["price"]
     )
 
     return normalized
@@ -456,7 +444,7 @@ def search_aviasales(
 
     if payload.get("success") is False:
         raise RuntimeError(
-            f"Aviasales API error: "
+            "Aviasales API error: "
             f"{payload.get('error')}"
         )
 
@@ -486,7 +474,7 @@ def normalize_aviasales(
     else:
         return []
 
-    results = []
+    normalized = []
 
     for item in records:
         if not isinstance(item, dict):
@@ -508,20 +496,24 @@ def normalize_aviasales(
         )
 
         try:
-            outbound_stops = int(
-                outbound_stops
-            ) if outbound_stops is not None else None
+            outbound_stops = (
+                int(outbound_stops)
+                if outbound_stops is not None
+                else None
+            )
         except Exception:
             outbound_stops = None
 
         try:
-            return_stops = int(
-                return_stops
-            ) if return_stops is not None else None
+            return_stops = (
+                int(return_stops)
+                if return_stops is not None
+                else None
+            )
         except Exception:
             return_stops = None
 
-        results.append(
+        normalized.append(
             {
                 "source": "Aviasales",
                 "origin": (
@@ -532,12 +524,8 @@ def normalize_aviasales(
                     item.get("destination_airport")
                     or destination
                 ),
-                "departure_date": (
-                    departure_date
-                ),
-                "return_date": (
-                    return_date
-                ),
+                "departure_date": departure_date,
+                "return_date": return_date,
                 "price": price,
                 "airline": (
                     item.get("airline")
@@ -567,11 +555,11 @@ def normalize_aviasales(
             }
         )
 
-    results.sort(
-        key=lambda x: x["price"]
+    normalized.sort(
+        key=lambda item: item["price"]
     )
 
-    return results
+    return normalized
 
 
 # ============================================================
@@ -638,7 +626,7 @@ def run_search(
 
 
 # ============================================================
-# МАКСИМУМ 1 ПЕРЕСАДКА
+# ФИЛЬТР ПЕРЕСАДОК
 # ============================================================
 
 def is_max_one_stop(result):
@@ -650,19 +638,86 @@ def is_max_one_stop(result):
         "return_stops"
     )
 
-    if outbound is not None:
-        if outbound > 1:
-            return False
+    if outbound is not None and outbound > 1:
+        return False
 
-    if returning is not None:
-        if returning > 1:
-            return False
+    if returning is not None and returning > 1:
+        return False
 
     return True
 
 
 # ============================================================
-# ИСТОРИЯ
+# УДАЛЕНИЕ ДУБЛИКАТОВ
+# ============================================================
+
+def deduplicate_results(results):
+    """
+    Один и тот же тариф может возвращаться
+    несколько раз из разных записей API.
+
+    Для мониторинга оставляем только самый
+    дешёвый вариант каждой комбинации:
+      источник
+      маршрут
+      даты
+      авиакомпания
+      номер рейса
+      количество пересадок
+    """
+
+    unique = {}
+
+    for result in results:
+        key = (
+            result.get("source", ""),
+            result.get("origin", ""),
+            result.get("destination", ""),
+            result.get("departure_date", ""),
+            result.get("return_date", ""),
+            result.get("airline", ""),
+            result.get("flight_number", ""),
+            tuple(result.get("airlines", [])),
+            result.get("outbound_stops"),
+            result.get("return_stops"),
+        )
+
+        current = unique.get(key)
+
+        if current is None:
+            unique[key] = result
+            continue
+
+        current_price = to_float(
+            current.get("price")
+        )
+
+        new_price = to_float(
+            result.get("price")
+        )
+
+        if (
+            new_price is not None
+            and (
+                current_price is None
+                or new_price < current_price
+            )
+        ):
+            unique[key] = result
+
+    result_list = list(
+        unique.values()
+    )
+
+    result_list.sort(
+        key=lambda item: item["price"]
+    )
+
+    return result_list
+
+
+# ============================================================
+# ИСТОРИЯ ЦЕН
 # ============================================================
 
 def history_key(result):
@@ -673,6 +728,8 @@ def history_key(result):
             result.get("destination", ""),
             result.get("departure_date", ""),
             result.get("return_date", ""),
+            result.get("airline", ""),
+            result.get("flight_number", ""),
         ]
     )
 
@@ -694,7 +751,7 @@ def update_history(
 
     state[key] = {
         "price": result.get("price"),
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": now_utc_iso(),
     }
 
     return old_price
@@ -845,9 +902,9 @@ def main():
 
     errors = []
 
-    # --------------------------------------------------------
+    # ========================================================
     # GOOGLE
-    # --------------------------------------------------------
+    # ========================================================
 
     for departure_date in DEPARTURE_DATES:
         for return_date in RETURN_DATES:
@@ -888,9 +945,9 @@ def main():
                         else:
                             google_empty += 1
 
-    # --------------------------------------------------------
+    # ========================================================
     # AVIASALES
-    # --------------------------------------------------------
+    # ========================================================
 
     for departure_date in DEPARTURE_DATES:
         for return_date in RETURN_DATES:
@@ -931,9 +988,9 @@ def main():
                         else:
                             aviasales_empty += 1
 
-    # --------------------------------------------------------
-    # ФИЛЬТР
-    # --------------------------------------------------------
+    # ========================================================
+    # ФИЛЬТР ПЕРЕСАДОК
+    # ========================================================
 
     google_filtered = [
         result
@@ -947,6 +1004,30 @@ def main():
         if is_max_one_stop(result)
     ]
 
+    # ========================================================
+    # УДАЛЕНИЕ ДУБЛИКАТОВ
+    # ========================================================
+
+    google_filtered = deduplicate_results(
+        google_filtered
+    )
+
+    aviasales_filtered = deduplicate_results(
+        aviasales_filtered
+    )
+
+    # ========================================================
+    # ГЛОБАЛЬНАЯ СОРТИРОВКА
+    # ========================================================
+
+    google_filtered.sort(
+        key=lambda item: item["price"]
+    )
+
+    aviasales_filtered.sort(
+        key=lambda item: item["price"]
+    )
+
     all_results = (
         google_filtered
         + aviasales_filtered
@@ -955,6 +1036,10 @@ def main():
     all_results.sort(
         key=lambda item: item["price"]
     )
+
+    # ========================================================
+    # ЦЕНЫ
+    # ========================================================
 
     google_cheap = [
         result
@@ -986,9 +1071,15 @@ def main():
         else None
     )
 
-    # --------------------------------------------------------
+    global_best = (
+        all_results[0]
+        if all_results
+        else None
+    )
+
+    # ========================================================
     # ИСТОРИЯ
-    # --------------------------------------------------------
+    # ========================================================
 
     new_count = 0
     price_drop_count = 0
@@ -1007,9 +1098,9 @@ def main():
 
     save_state(state)
 
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
+    # ========================================================
+    # TELEGRAM SUMMARY
+    # ========================================================
 
     lines = [
         "Maxim Flight Monitor",
@@ -1035,6 +1126,8 @@ def main():
         f"Успешно: {google_successes}",
         f"Ошибок: {google_errors}",
         f"Пустых результатов: {google_empty}",
+        f"Уникальных вариантов: "
+        f"{len(google_filtered)}",
         f"Вариантов ≤ {format_price(PRICE_LIMIT)}: "
         f"{len(google_cheap)}",
     ]
@@ -1060,6 +1153,8 @@ def main():
             f"Успешно: {aviasales_successes}",
             f"Ошибок: {aviasales_errors}",
             f"Пустых результатов: {aviasales_empty}",
+            f"Уникальных вариантов: "
+            f"{len(aviasales_filtered)}",
             f"Вариантов ≤ {format_price(PRICE_LIMIT)}: "
             f"{len(aviasales_cheap)}",
         ]
@@ -1076,20 +1171,33 @@ def main():
             "нет данных"
         )
 
+    # ========================================================
+    # ИТОГ
+    # ========================================================
+
     lines.extend(
         [
             "",
             "━━━━━━━━━━━━━━━━━━",
             "📊 ИТОГ",
             "━━━━━━━━━━━━━━━━━━",
-            f"Подходящих вариантов: "
+            f"Уникальных вариантов: "
             f"{len(all_results)}",
             f"≤ {format_price(PRICE_LIMIT)}: "
             f"{len(cheap_results)}",
-            f"🆕 Новых вариантов: "
-            f"{new_count}",
-            f"📉 Снижений цены: "
-            f"{price_drop_count}",
+        ]
+    )
+
+    if global_best:
+        lines.append(
+            "🏆 Лучшая найденная цена: "
+            f"{format_price(global_best['price'])}"
+        )
+
+    lines.extend(
+        [
+            f"🆕 Новых вариантов: {new_count}",
+            f"📉 Снижений цены: {price_drop_count}",
         ]
     )
 
@@ -1121,9 +1229,9 @@ def main():
             ]
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # ОШИБКИ
-    # --------------------------------------------------------
+    # ========================================================
 
     if errors:
         lines.extend(
@@ -1158,9 +1266,9 @@ def main():
                 f"... ещё {len(errors) - 15}"
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # AVIASALES CACHE INFO
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         aviasales_successes > 0
@@ -1179,14 +1287,18 @@ def main():
 
     telegram_send(summary)
 
-    # --------------------------------------------------------
+    # ========================================================
     # ЛУЧШИЕ 5
-    # --------------------------------------------------------
+    # ========================================================
 
     for result in all_results[:5]:
         telegram_send(
             format_result(result)
         )
+
+    # ========================================================
+    # LOG
+    # ========================================================
 
     print(summary)
 
