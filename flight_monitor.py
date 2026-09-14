@@ -190,14 +190,12 @@ def search_google(
     return_date,
 ):
     """
-    Рабочая схема round-trip для текущего fast-flights:
+    Round-trip поиск через текущий fast-flights.
 
-    один create_query() с двумя FlightQuery
-    и trip="round-trip".
-
-    Никаких get_return_flights / select_flight здесь
-    не используем, поскольку именно этот вариант уже
-    успешно отработал в текущем проекте.
+    Используем именно ту схему, которая уже работает
+    в текущем проекте:
+    create_query(..., trip="round-trip")
+    + get_flights(query).
     """
 
     query = create_query(
@@ -227,12 +225,10 @@ def search_google(
     return list(results)
 
 
-def get_segment_airport_code(segment, attribute):
-    """
-    Пытаемся достать код аэропорта из сегмента
-    максимально безопасно.
-    """
-
+def get_segment_airport_code(
+    segment,
+    attribute,
+):
     try:
         airport = getattr(
             segment,
@@ -340,20 +336,22 @@ def normalize_google_results(
 
                     if to_code == destination:
                         outbound_finished = True
+
                 else:
                     return_segments.append(
                         segment
                     )
 
-            # Если parser Google не позволил
-            # нормально разделить плечи,
-            # используем вторую попытку:
+            # Защита на случай, если parser Google
+            # не позволил корректно разделить плечи.
             if (
                 not outbound_segments
                 or not return_segments
             ):
                 if len(segments) >= 2:
-                    midpoint = len(segments) // 2
+                    midpoint = (
+                        len(segments) // 2
+                    )
 
                     outbound_segments = (
                         segments[:midpoint]
@@ -376,18 +374,26 @@ def normalize_google_results(
                     "source": "Google",
                     "origin": origin,
                     "destination": destination,
-                    "departure_date": departure_date,
-                    "return_date": return_date,
+                    "departure_date": (
+                        departure_date
+                    ),
+                    "return_date": (
+                        return_date
+                    ),
                     "price": price,
                     "airlines": airlines,
-                    "outbound_stops": outbound_stops,
-                    "return_stops": return_stops,
+                    "outbound_stops": (
+                        outbound_stops
+                    ),
+                    "return_stops": (
+                        return_stops
+                    ),
                 }
             )
 
         except Exception:
-            # Один плохой результат Google
-            # не должен ломать весь запрос.
+            # Один кривой результат Google
+            # не ломает весь запрос.
             continue
 
     normalized.sort(
@@ -524,8 +530,12 @@ def normalize_aviasales(
                     item.get("destination_airport")
                     or destination
                 ),
-                "departure_date": departure_date,
-                "return_date": return_date,
+                "departure_date": (
+                    departure_date
+                ),
+                "return_date": (
+                    return_date
+                ),
                 "price": price,
                 "airline": (
                     item.get("airline")
@@ -535,8 +545,12 @@ def normalize_aviasales(
                     item.get("flight_number")
                     or ""
                 ),
-                "outbound_stops": outbound_stops,
-                "return_stops": return_stops,
+                "outbound_stops": (
+                    outbound_stops
+                ),
+                "return_stops": (
+                    return_stops
+                ),
                 "departure": (
                     item.get("departure_at")
                     or ""
@@ -638,10 +652,16 @@ def is_max_one_stop(result):
         "return_stops"
     )
 
-    if outbound is not None and outbound > 1:
+    if (
+        outbound is not None
+        and outbound > 1
+    ):
         return False
 
-    if returning is not None and returning > 1:
+    if (
+        returning is not None
+        and returning > 1
+    ):
         return False
 
     return True
@@ -653,17 +673,14 @@ def is_max_one_stop(result):
 
 def deduplicate_results(results):
     """
-    Один и тот же тариф может возвращаться
-    несколько раз из разных записей API.
+    Убирает повторяющиеся записи API.
 
-    Для мониторинга оставляем только самый
-    дешёвый вариант каждой комбинации:
-      источник
-      маршрут
-      даты
-      авиакомпания
-      номер рейса
-      количество пересадок
+    Одинаковым считается вариант с одинаковыми:
+    источник
+    маршрут
+    датами
+    авиакомпанией/рейсом
+    количеством пересадок.
     """
 
     unique = {}
@@ -677,7 +694,9 @@ def deduplicate_results(results):
             result.get("return_date", ""),
             result.get("airline", ""),
             result.get("flight_number", ""),
-            tuple(result.get("airlines", [])),
+            tuple(
+                result.get("airlines", [])
+            ),
             result.get("outbound_stops"),
             result.get("return_stops"),
         )
@@ -758,7 +777,7 @@ def update_history(
 
 
 # ============================================================
-# ФОРМАТ TELEGRAM
+# ФОРМАТ ОБЫЧНОГО РЕЗУЛЬТАТА
 # ============================================================
 
 def format_result(result):
@@ -806,6 +825,7 @@ def format_result(result):
         stops_text = (
             "🔄 Пересадки: нет данных"
         )
+
     else:
         out_text = (
             str(outbound_stops)
@@ -868,6 +888,176 @@ def format_result(result):
 
     if link:
         if not str(link).startswith("http"):
+            link = (
+                "https://www.aviasales.ru"
+                + str(link)
+            )
+
+        lines.append(
+            f"🔗 {link}"
+        )
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# ФОРМАТ УВЕДОМЛЕНИЯ
+# ============================================================
+
+def format_alert(
+    result,
+    alert_type,
+    old_price=None,
+):
+    source = result.get(
+        "source",
+        "",
+    )
+
+    price = result.get(
+        "price"
+    )
+
+    origin = result.get(
+        "origin",
+        "",
+    )
+
+    destination = result.get(
+        "destination",
+        "",
+    )
+
+    departure_date = result.get(
+        "departure_date",
+        "",
+    )
+
+    return_date = result.get(
+        "return_date",
+        "",
+    )
+
+    outbound_stops = result.get(
+        "outbound_stops"
+    )
+
+    return_stops = result.get(
+        "return_stops"
+    )
+
+    if (
+        outbound_stops is not None
+        or return_stops is not None
+    ):
+        out_text = (
+            str(outbound_stops)
+            if outbound_stops is not None
+            else "?"
+        )
+
+        back_text = (
+            str(return_stops)
+            if return_stops is not None
+            else "?"
+        )
+
+        stops_text = (
+            f"🔄 Пересадки: "
+            f"{out_text} / {back_text}"
+        )
+
+    else:
+        stops_text = (
+            "🔄 Пересадки: нет данных"
+        )
+
+    if alert_type == "limit":
+        title = "🔥 ЦЕНА НИЖЕ ЛИМИТА"
+
+    elif alert_type == "new":
+        title = (
+            "🆕 НОВЫЙ ВАРИАНТ "
+            "≤ 100 000 ₽"
+        )
+
+    elif alert_type == "drop":
+        title = "📉 ЦЕНА СНИЗИЛАСЬ"
+
+    else:
+        title = "✈️ ИЗМЕНЕНИЕ ЦЕНЫ"
+
+    lines = [
+        title,
+        "",
+        f"💰 Сейчас: {format_price(price)}",
+    ]
+
+    if old_price is not None:
+        difference = (
+            old_price - price
+        )
+
+        if difference > 0:
+            lines.append(
+                "⬇️ Снижение: "
+                f"{format_price(difference)}"
+            )
+
+        lines.append(
+            "Предыдущая цена: "
+            f"{format_price(old_price)}"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"🔎 {source}",
+            f"🛫 {origin} → {destination}",
+            f"📅 {departure_date}",
+            f"↩️ {return_date}",
+            stops_text,
+        ]
+    )
+
+    airlines = result.get(
+        "airlines"
+    )
+
+    if airlines:
+        lines.append(
+            "✈️ "
+            + ", ".join(airlines)
+        )
+
+    airline = result.get(
+        "airline"
+    )
+
+    flight_number = result.get(
+        "flight_number"
+    )
+
+    if airline:
+        airline_text = airline
+
+        if flight_number:
+            airline_text += (
+                f" {flight_number}"
+            )
+
+        lines.append(
+            f"✈️ {airline_text}"
+        )
+
+    link = result.get(
+        "link"
+    )
+
+    if link:
+        if not str(link).startswith(
+            "http"
+        ):
             link = (
                 "https://www.aviasales.ru"
                 + str(link)
@@ -1017,7 +1207,7 @@ def main():
     )
 
     # ========================================================
-    # ГЛОБАЛЬНАЯ СОРТИРОВКА
+    # СОРТИРОВКА
     # ========================================================
 
     google_filtered.sort(
@@ -1078,11 +1268,15 @@ def main():
     )
 
     # ========================================================
-    # ИСТОРИЯ
+    # ИСТОРИЯ И СОБЫТИЯ
     # ========================================================
 
     new_count = 0
     price_drop_count = 0
+
+    price_drops = []
+    limit_hits = []
+    new_cheap = []
 
     for result in all_results:
         old_price = update_history(
@@ -1090,211 +1284,231 @@ def main():
             result,
         )
 
+        current_price = result.get(
+            "price"
+        )
+
+        # ----------------------------------------------------
+        # НОВЫЙ ВАРИАНТ
+        # ----------------------------------------------------
+
         if old_price is None:
             new_count += 1
 
-        elif result["price"] < old_price:
+            if (
+                current_price is not None
+                and current_price <= PRICE_LIMIT
+            ):
+                new_cheap.append(
+                    result
+                )
+
+            continue
+
+        # ----------------------------------------------------
+        # СНИЖЕНИЕ
+        # ----------------------------------------------------
+
+        if (
+            current_price is not None
+            and current_price < old_price
+        ):
             price_drop_count += 1
+
+            price_drops.append(
+                (
+                    result,
+                    old_price,
+                )
+            )
+
+            # ------------------------------------------------
+            # ПЕРЕСЕЧЕНИЕ ЛИМИТА
+            # ------------------------------------------------
+
+            if (
+                old_price > PRICE_LIMIT
+                and current_price <= PRICE_LIMIT
+            ):
+                limit_hits.append(
+                    (
+                        result,
+                        old_price,
+                    )
+                )
 
     save_state(state)
 
     # ========================================================
-    # TELEGRAM SUMMARY
+    # ВАЖНЫЕ УВЕДОМЛЕНИЯ
+    # ========================================================
+
+    # --------------------------------------------------------
+    # 1. ПЕРЕСЕЧЕНИЕ ПОРОГА 100 000 ₽
+    # --------------------------------------------------------
+
+    for result, old_price in sorted(
+        limit_hits,
+        key=lambda item: (
+            item[0]["price"]
+        ),
+    )[:5]:
+
+        telegram_send(
+            format_alert(
+                result,
+                "limit",
+                old_price,
+            )
+        )
+
+    # --------------------------------------------------------
+    # 2. НОВЫЕ ВАРИАНТЫ ≤100 000 ₽
+    # --------------------------------------------------------
+
+    already_sent_keys = {
+        history_key(result)
+        for result, _ in limit_hits
+    }
+
+    for result in sorted(
+        new_cheap,
+        key=lambda item: item["price"],
+    )[:5]:
+
+        key = history_key(result)
+
+        if key in already_sent_keys:
+            continue
+
+        telegram_send(
+            format_alert(
+                result,
+                "new",
+            )
+        )
+
+    # --------------------------------------------------------
+    # 3. ДРУГИЕ СНИЖЕНИЯ
+    # --------------------------------------------------------
+
+    important_drops = sorted(
+        price_drops,
+        key=lambda item: (
+            item[1]
+            - item[0]["price"]
+        ),
+        reverse=True,
+    )
+
+    for result, old_price in (
+        important_drops[:5]
+    ):
+
+        # Для перехода через 100k уже было
+        # отправлено специальное сообщение.
+        if (
+            old_price > PRICE_LIMIT
+            and result["price"] <= PRICE_LIMIT
+        ):
+            continue
+
+        telegram_send(
+            format_alert(
+                result,
+                "drop",
+                old_price,
+            )
+        )
+
+    # ========================================================
+    # КОРОТКИЙ TELEGRAM SUMMARY
     # ========================================================
 
     lines = [
-        "Maxim Flight Monitor",
+        "✈️ Maxim Flight Monitor",
         "",
-        "Запуск завершён.",
-        "",
-        "📅 Вылет:",
-        "26 или 27 декабря 2026",
-        "",
-        "📅 Возврат:",
-        "9, 10 или 11 января 2027",
-        "",
-        "🛫 Москва: SVO / DME / VKO",
-        "🛬 BKK / UTP",
-        "👤 1 взрослый",
-        "💺 Economy",
-        "🔄 Максимум 1 пересадка",
+        "26/27.12.2026 → "
+        "09/10/11.01.2027",
+        "Москва: SVO / DME / VKO",
+        "BKK / UTP · Economy · ≤1 пересадка",
         "",
         "━━━━━━━━━━━━━━━━━━",
-        "🔎 GOOGLE FLIGHTS",
-        "━━━━━━━━━━━━━━━━━━",
-        f"Поисков: {google_searches}",
-        f"Успешно: {google_successes}",
-        f"Ошибок: {google_errors}",
-        f"Пустых результатов: {google_empty}",
-        f"Уникальных вариантов: "
-        f"{len(google_filtered)}",
-        f"Вариантов ≤ {format_price(PRICE_LIMIT)}: "
-        f"{len(google_cheap)}",
     ]
-
-    if google_best:
-        lines.append(
-            "💵 Минимальная найденная цена: "
-            f"{format_price(google_best['price'])}"
-        )
-    else:
-        lines.append(
-            "💵 Минимальная найденная цена: "
-            "нет данных"
-        )
-
-    lines.extend(
-        [
-            "",
-            "━━━━━━━━━━━━━━━━━━",
-            "🔎 AVIASALES",
-            "━━━━━━━━━━━━━━━━━━",
-            f"Поисков: {aviasales_searches}",
-            f"Успешно: {aviasales_successes}",
-            f"Ошибок: {aviasales_errors}",
-            f"Пустых результатов: {aviasales_empty}",
-            f"Уникальных вариантов: "
-            f"{len(aviasales_filtered)}",
-            f"Вариантов ≤ {format_price(PRICE_LIMIT)}: "
-            f"{len(aviasales_cheap)}",
-        ]
-    )
 
     if aviasales_best:
         lines.append(
-            "💵 Минимальная найденная цена: "
+            "🔎 Aviasales: "
             f"{format_price(aviasales_best['price'])}"
         )
     else:
         lines.append(
-            "💵 Минимальная найденная цена: "
-            "нет данных"
+            "🔎 Aviasales: нет данных"
         )
 
-    # ========================================================
-    # ИТОГ
-    # ========================================================
+    if google_best:
+        lines.append(
+            "🔎 Google: "
+            f"{format_price(google_best['price'])}"
+        )
+    else:
+        lines.append(
+            "🔎 Google: нет данных"
+        )
+
+    if global_best:
+        lines.append(
+            "🏆 Минимум: "
+            f"{format_price(global_best['price'])}"
+        )
+    else:
+        lines.append(
+            "🏆 Минимум: нет данных"
+        )
 
     lines.extend(
         [
             "",
-            "━━━━━━━━━━━━━━━━━━",
-            "📊 ИТОГ",
-            "━━━━━━━━━━━━━━━━━━",
-            f"Уникальных вариантов: "
-            f"{len(all_results)}",
-            f"≤ {format_price(PRICE_LIMIT)}: "
+            "🎯 ≤100 000 ₽: "
             f"{len(cheap_results)}",
+            "📉 Снижений: "
+            f"{price_drop_count}",
+            "🆕 Новых: "
+            f"{new_count}",
+            "",
+            "Google: "
+            f"{google_successes}/"
+            f"{google_searches} успешно",
+            "Aviasales: "
+            f"{aviasales_successes}/"
+            f"{aviasales_searches} успешно",
         ]
     )
 
-    if global_best:
+    if google_errors:
         lines.append(
-            "🏆 Лучшая найденная цена: "
-            f"{format_price(global_best['price'])}"
+            "⚠️ Google ошибок: "
+            f"{google_errors}"
         )
 
-    lines.extend(
-        [
-            f"🆕 Новых вариантов: {new_count}",
-            f"📉 Снижений цены: {price_drop_count}",
-        ]
-    )
+    if aviasales_empty:
+        lines.append(
+            "ℹ️ Aviasales без тарифа: "
+            f"{aviasales_empty}"
+        )
 
-    if cheap_results:
+    if limit_hits:
         lines.extend(
             [
                 "",
-                "🎯 Найдены билеты дешевле "
-                "100 000 ₽.",
-            ]
-        )
-
-    elif all_results:
-        lines.extend(
-            [
-                "",
-                "ℹ️ Билетов дешевле 100 000 ₽ "
-                "пока нет, но найдены варианты "
-                "выше лимита.",
-            ]
-        )
-
-    else:
-        lines.extend(
-            [
-                "",
-                "❌ Подходящих вариантов пока "
-                "не найдено.",
-            ]
-        )
-
-    # ========================================================
-    # ОШИБКИ
-    # ========================================================
-
-    if errors:
-        lines.extend(
-            [
-                "",
-                "⚠️ ТЕХНИЧЕСКИЕ ОШИБКИ",
-            ]
-        )
-
-        for index, error in enumerate(
-            errors[:15],
-            start=1,
-        ):
-            (
-                source,
-                origin,
-                destination,
-                departure_date,
-                return_date,
-                message,
-            ) = error
-
-            lines.append(
-                f"{index}. {source} | "
-                f"{origin}->{destination} | "
-                f"{departure_date}->{return_date} | "
-                f"{message}"
-            )
-
-        if len(errors) > 15:
-            lines.append(
-                f"... ещё {len(errors) - 15}"
-            )
-
-    # ========================================================
-    # AVIASALES CACHE INFO
-    # ========================================================
-
-    if (
-        aviasales_successes > 0
-        and aviasales_empty > 0
-    ):
-        lines.extend(
-            [
-                "",
-                "ℹ️ Aviasales отвечает без ошибок, "
-                "но по части запросов сейчас нет "
-                "тарифов в Data API кеше.",
+                "🔥 Есть варианты, "
+                "перешедшие ниже лимита!",
             ]
         )
 
     summary = "\n".join(lines)
 
     telegram_send(summary)
-
-    # ========================================================
-    # ЛУЧШИЕ 5
-    # ========================================================
-
-    for result in all_results[:5]:
-        telegram_send(
-            format_result(result)
-        )
 
     # ========================================================
     # LOG
