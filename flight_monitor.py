@@ -1,7 +1,9 @@
 import os
 import json
-import requests
+import traceback
 from pathlib import Path
+
+import requests
 
 from fast_flights import (
     FlightQuery,
@@ -23,34 +25,26 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 # ОСНОВНЫЕ НАСТРОЙКИ
 # ============================================================
 
-# Максимальная цена билета
 PRICE_LIMIT_RUB = 70000
 
-# Ориентировочный курс для отображения цены в долларах.
-# Сам поиск всё равно выполняется в RUB.
 RUB_PER_USD = 86.59
 
-# Рассчитанный долларовый лимит
 PRICE_LIMIT_USD = PRICE_LIMIT_RUB / RUB_PER_USD
 
 
 # ============================================================
-# ДАТЫ
+# ДАТЫ ПОИСКА
 # ============================================================
 
 OUTBOUND_DATES = [
-    "2026-12-28",
-    "2026-12-29",
-    "2026-12-30",
+    "2026-12-26",
+    "2026-12-27",
 ]
 
 RETURN_DATES = [
-    "2027-01-20",
-    "2027-01-21",
-    "2027-01-22",
-    "2027-01-23",
-    "2027-01-24",
-    "2027-01-25",
+    "2027-01-09",
+    "2027-01-10",
+    "2027-01-11",
 ]
 
 
@@ -76,24 +70,6 @@ DESTINATIONS = {
 
 
 # ============================================================
-# АВИАКОМПАНИИ
-# ============================================================
-
-TARGET_AIRLINES = {
-    "G9": "Air Arabia",
-    "CA": "Air China",
-    "WY": "Oman Air",
-    "EY": "Etihad Airways",
-    "TK": "Turkish Airlines",
-    "FZ": "flydubai",
-    "CZ": "China Southern",
-    "MU": "China Eastern",
-    "QR": "Qatar Airways",
-    "EK": "Emirates",
-}
-
-
-# ============================================================
 # ФАЙЛ СОСТОЯНИЯ
 # ============================================================
 
@@ -105,21 +81,31 @@ STATE_FILE = Path("flight_state.json")
 # ============================================================
 
 def send_telegram(text):
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text[:4000],
+                "disable_web_page_preview": True,
+            },
+            timeout=30,
+        )
 
-    response = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text[:4000],
-            "disable_web_page_preview": True,
-        },
-        timeout=30,
-    )
+        print("Telegram:", response.status_code)
 
-    print(
-        "Telegram:",
-        response.status_code,
-    )
+        if not response.ok:
+            print("Telegram error:", response.text)
+
+        return response.ok
+
+    except Exception as error:
+        print(
+            "TELEGRAM ERROR:",
+            type(error).__name__,
+            str(error),
+        )
+        return False
 
 
 # ============================================================
@@ -132,7 +118,6 @@ def load_state():
         return {}
 
     try:
-
         return json.loads(
             STATE_FILE.read_text(
                 encoding="utf-8"
@@ -171,7 +156,6 @@ def search_flights(
     return_date,
     from_airport,
     destination,
-    airline_codes=None,
 ):
 
     outbound = FlightQuery(
@@ -179,7 +163,6 @@ def search_flights(
         from_airport=from_airport,
         to_airport=destination,
         max_stops=1,
-        airlines=airline_codes,
     )
 
     inbound = FlightQuery(
@@ -252,86 +235,6 @@ def get_airlines(flight):
     return str(value)
 
 
-def identify_target_airlines(
-    airlines_text
-):
-
-    text = airlines_text.lower()
-
-    aliases = {
-
-        "G9": [
-            "air arabia",
-            "g9",
-        ],
-
-        "CA": [
-            "air china",
-            "ca",
-        ],
-
-        "WY": [
-            "oman air",
-            "wy",
-        ],
-
-        "EY": [
-            "etihad",
-            "etihad airways",
-            "ey",
-        ],
-
-        "TK": [
-            "turkish airlines",
-            "turkish",
-            "tk",
-        ],
-
-        "FZ": [
-            "flydubai",
-            "fly dubai",
-            "fz",
-        ],
-
-        "CZ": [
-            "china southern",
-            "cz",
-        ],
-
-        "MU": [
-            "china eastern",
-            "mu",
-        ],
-
-        "QR": [
-            "qatar airways",
-            "qatar",
-            "qr",
-        ],
-
-        "EK": [
-            "emirates",
-            "ek",
-        ],
-    }
-
-    found = []
-
-    for code, names in aliases.items():
-
-        for name in names:
-
-            if name in text:
-
-                found.append(
-                    TARGET_AIRLINES[code]
-                )
-
-                break
-
-    return found
-
-
 # ============================================================
 # СЕГМЕНТЫ
 # ============================================================
@@ -398,9 +301,8 @@ def add_result(
     outbound,
     return_date,
     airport,
-    destination,
+    destination_code,
     flight,
-    search_type,
 ):
 
     price = get_price(flight)
@@ -408,20 +310,11 @@ def add_result(
     if price is None:
         return
 
-    # Главный фильтр:
-    # всё дороже 70 000 ₽ игнорируем
+    # Игнорируем всё дороже лимита
     if price > PRICE_LIMIT_RUB:
         return
 
-    airlines = get_airlines(
-        flight
-    )
-
-    target_airlines = (
-        identify_target_airlines(
-            airlines
-        )
-    )
+    airlines = get_airlines(flight)
 
     results.append({
 
@@ -431,22 +324,17 @@ def add_result(
 
         "airport": airport,
 
-        "destination": destination,
+        "destination": destination_code,
+
+        "destination_name":
+            DESTINATIONS[destination_code],
 
         "price": price,
 
         "airlines": airlines,
 
-        "target_airlines":
-            target_airlines,
-
         "segments":
-            get_segments(
-                flight
-            ),
-
-        "search_type":
-            search_type,
+            get_segments(flight),
     })
 
 
@@ -454,19 +342,14 @@ def add_result(
 # ОБЩИЙ ПОИСК
 # ============================================================
 
-def search_general(results):
+def search_all(results, errors):
 
-    print(
-        "================================"
-    )
+    total_searches = 0
+    successful_searches = 0
 
-    print(
-        "GENERAL GOOGLE FLIGHTS SEARCH"
-    )
-
-    print(
-        "================================"
-    )
+    print("================================")
+    print("GENERAL GOOGLE FLIGHTS SEARCH")
+    print("================================")
 
     for outbound in OUTBOUND_DATES:
 
@@ -474,11 +357,13 @@ def search_general(results):
 
             for airport in MOSCOW_AIRPORTS:
 
-                for destination, destination_name in DESTINATIONS.items():
+                for destination_code in DESTINATIONS:
+
+                    total_searches += 1
 
                     print(
-                        f"GENERAL: "
-                        f"{airport}->{destination} "
+                        f"\nSEARCH {total_searches}: "
+                        f"{airport}->{destination_code} "
                         f"{outbound}->{return_date}"
                     )
 
@@ -488,8 +373,10 @@ def search_general(results):
                             outbound,
                             return_date,
                             airport,
-                            destination,
+                            destination_code,
                         )
+
+                        successful_searches += 1
 
                         print(
                             "Results:",
@@ -503,93 +390,32 @@ def search_general(results):
                                 outbound,
                                 return_date,
                                 airport,
-                                destination_name,
+                                destination_code,
                                 flight,
-                                "GENERAL",
                             )
 
                     except Exception as error:
 
-                        print(
-                            "GENERAL ERROR:",
-                            type(error).__name__,
-                            str(error),
-                        )
-
-
-# ============================================================
-# СПЕЦИАЛЬНЫЙ ПОИСК АВИАКОМПАНИЙ
-# ============================================================
-
-def search_target_airlines(results):
-
-    print(
-        "================================"
-    )
-
-    print(
-        "TARGET AIRLINE SEARCH"
-    )
-
-    print(
-        "================================"
-    )
-
-    for code, airline_name in TARGET_AIRLINES.items():
-
-        print(
-            f"\n>>> {airline_name} ({code})"
-        )
-
-        for outbound in OUTBOUND_DATES:
-
-            for return_date in RETURN_DATES:
-
-                for airport in MOSCOW_AIRPORTS:
-
-                    destination = "BKK"
-
-                    print(
-                        f"{airline_name}: "
-                        f"{airport}->BKK "
-                        f"{outbound}->{return_date}"
-                    )
-
-                    try:
-
-                        flights = search_flights(
-                            outbound,
-                            return_date,
-                            airport,
-                            destination,
-                            airline_codes=[code],
+                        error_text = (
+                            f"{airport}->{destination_code} "
+                            f"{outbound}->{return_date}: "
+                            f"{type(error).__name__}: "
+                            f"{error}"
                         )
 
                         print(
-                            "Results:",
-                            len(flights),
+                            "SEARCH ERROR:",
+                            error_text,
                         )
 
-                        for flight in flights:
-
-                            add_result(
-                                results,
-                                outbound,
-                                return_date,
-                                airport,
-                                "Bangkok",
-                                flight,
-                                code,
-                            )
-
-                    except Exception as error:
-
-                        print(
-                            "AIRLINE ERROR:",
-                            code,
-                            type(error).__name__,
-                            str(error),
+                        errors.append(
+                            error_text
                         )
+
+    return (
+        total_searches,
+        successful_searches,
+    )
 
 
 # ============================================================
@@ -671,31 +497,15 @@ def build_flight_text(item):
 
     for segment in item["segments"]:
 
-        airline = segment[
-            "airline"
-        ]
+        airline = segment["airline"]
+        number = segment["number"]
+        departure = segment["departure"]
+        arrival = segment["arrival"]
 
-        number = segment[
-            "number"
-        ]
-
-        departure = segment[
-            "departure"
-        ]
-
-        arrival = segment[
-            "arrival"
-        ]
-
-        text += (
-            f"{airline}"
-        )
+        text += airline
 
         if number:
-
-            text += (
-                f" {number}"
-            )
+            text += f" {number}"
 
         text += (
             f": {departure} → "
@@ -706,65 +516,145 @@ def build_flight_text(item):
 
 
 # ============================================================
-# TELEGRAM
+# ПОЛНОЕ СООБЩЕНИЕ О БИЛЕТЕ
 # ============================================================
 
-def build_message(item):
-
-    price_rub = format_rub(
-        item["price"]
-    )
-
-    price_usd = format_usd(
-        item["price"]
-    )
-
-    limit_usd = format_usd(
-        PRICE_LIMIT_RUB
-    )
+def build_flight_message(item):
 
     message = (
-        "🚨 ДЕШЁВЫЙ БИЛЕТ!\n\n"
+        "✈️ Найден билет\n\n"
 
-        f"💰 {price_rub} "
-        f"({price_usd})\n"
+        f"💰 {format_rub(item['price'])} "
+        f"({format_usd(item['price'])})\n"
 
         f"📅 {item['outbound']} → "
         f"{item['return']}\n"
 
         f"🛫 {item['airport']}\n"
 
-        f"🛬 {item['destination']}\n"
+        f"🛬 {item['destination_name']} "
+        f"({item['destination']})\n"
 
         f"✈️ {item['airlines']}\n\n"
     )
 
-    if item["target_airlines"]:
+    flight_text = build_flight_text(item)
 
-        message += (
-            "⭐ "
-            + ", ".join(
-                item[
-                    "target_airlines"
-                ]
-            )
-            + "\n\n"
-        )
-
-    message += (
-        build_flight_text(
-            item
-        )
-    )
+    if flight_text:
+        message += flight_text
 
     message += (
         "\n🎯 Лимит: "
         f"{format_rub(PRICE_LIMIT_RUB)} "
-        f"(≈ {limit_usd})\n"
+        f"(≈ {format_usd(PRICE_LIMIT_RUB)})\n\n"
 
-        "Источник: Google Flights / "
-        "fast-flights."
+        "Источник: Google Flights / fast-flights."
     )
+
+    return message
+
+
+# ============================================================
+# ГЛАВНОЕ СООБЩЕНИЕ ЗА ЗАПУСК
+# ============================================================
+
+def build_run_summary(
+    results,
+    errors,
+    total_searches,
+    successful_searches,
+    new_count,
+    cheaper_count,
+):
+
+    message = (
+        "🔎 Maxim Flight Monitor\n\n"
+
+        "Запуск завершён.\n\n"
+
+        "📅 Вылет:\n"
+        "26 или 27 декабря 2026\n\n"
+
+        "📅 Возврат:\n"
+        "9, 10 или 11 января 2027\n\n"
+
+        "🛫 Москва: SVO / DME / VKO\n"
+        "🛬 BKK / UTP\n"
+        "👤 1 взрослый\n"
+        "💺 Economy\n"
+        "🔄 Максимум 1 пересадка\n\n"
+
+        f"🔍 Поисков: {total_searches}\n"
+        f"✅ Успешно: {successful_searches}\n"
+        f"❌ Ошибок: {len(errors)}\n\n"
+    )
+
+    if results:
+
+        message += (
+            f"💰 Найдено вариантов до "
+            f"{format_rub(PRICE_LIMIT_RUB)}: "
+            f"{len(results)}\n\n"
+        )
+
+        for index, item in enumerate(
+            results[:10],
+            start=1,
+        ):
+
+            message += (
+                f"{index}. "
+                f"{format_rub(item['price'])} "
+                f"({format_usd(item['price'])})\n"
+
+                f"   {item['outbound']} → "
+                f"{item['return']}\n"
+
+                f"   {item['airport']} → "
+                f"{item['destination']}\n"
+
+                f"   {item['airlines']}\n\n"
+            )
+
+        if len(results) > 10:
+
+            message += (
+                f"... ещё "
+                f"{len(results) - 10} вариантов\n\n"
+            )
+
+    else:
+
+        message += (
+            f"❌ Билетов дешевле "
+            f"{format_rub(PRICE_LIMIT_RUB)} "
+            "не найдено.\n\n"
+        )
+
+    message += (
+        f"🆕 Новых вариантов: {new_count}\n"
+        f"📉 Снижения цены: {cheaper_count}\n"
+    )
+
+    if errors:
+
+        message += (
+            "\n⚠️ Были ошибки поиска.\n"
+            "Первые ошибки:\n"
+        )
+
+        for error in errors[:3]:
+
+            message += (
+                f"• {error[:500]}\n"
+            )
+
+        if len(errors) > 3:
+
+            message += (
+                f"• ... ещё "
+                f"{len(errors) - 3} ошибок\n"
+            )
 
     return message
 
@@ -775,13 +665,9 @@ def build_message(item):
 
 def main():
 
-    print(
-        "================================"
-    )
-
-    print(
-        "FLIGHT MONITOR START"
-    )
+    print("================================")
+    print("FLIGHT MONITOR START")
+    print("================================")
 
     print(
         f"Price limit: "
@@ -798,25 +684,38 @@ def main():
         f"{RUB_PER_USD}"
     )
 
-    print(
-        "================================"
-    )
-
     state = load_state()
 
     all_results = []
+    errors = []
 
+    try:
 
-    # Общий поиск
-    search_general(
-        all_results
-    )
+        total_searches, successful_searches = (
+            search_all(
+                all_results,
+                errors,
+            )
+        )
 
+    except Exception as error:
 
-    # Поиск целевых авиакомпаний
-    search_target_airlines(
-        all_results
-    )
+        error_text = (
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+        errors.append(error_text)
+
+        print(
+            "FATAL SEARCH ERROR:",
+            error_text,
+        )
+
+        traceback.print_exc()
+
+        total_searches = 0
+        successful_searches = 0
 
 
     print(
@@ -825,10 +724,8 @@ def main():
     )
 
 
-    all_results = (
-        remove_duplicates(
-            all_results
-        )
+    all_results = remove_duplicates(
+        all_results
     )
 
 
@@ -844,100 +741,67 @@ def main():
     )
 
 
-    notifications = 0
+    new_count = 0
+    cheaper_count = 0
 
 
     # ========================================================
-    # УВЕДОМЛЕНИЯ
+    # ОБНОВЛЕНИЕ СОСТОЯНИЯ
     # ========================================================
 
     for item in all_results:
 
-        key = make_key(
-            item
-        )
+        key = make_key(item)
 
-        new_price = item[
-            "price"
-        ]
+        new_price = item["price"]
 
-        old_price = state.get(
-            key
-        )
+        old_price = state.get(key)
 
 
-        # Новый вариант
         if old_price is None:
 
-            send_telegram(
-                build_message(
-                    item
-                )
-            )
-
-            notifications += 1
+            new_count += 1
 
             state[key] = new_price
 
             continue
 
 
-        # Цена снизилась
         if new_price < old_price:
 
-            difference = (
-                old_price
-                - new_price
-            )
-
-            message = (
-                "📉 ЦЕНА УПАЛА!\n\n"
-
-                f"Было: "
-                f"{format_rub(old_price)} "
-                f"({format_usd(old_price)})\n"
-
-                f"Стало: "
-                f"{format_rub(new_price)} "
-                f"({format_usd(new_price)})\n"
-
-                f"Экономия: "
-                f"{format_rub(difference)} "
-                f"({format_usd(difference)})\n\n"
-            )
-
-            message += (
-                build_message(
-                    item
-                )
-            )
-
-            send_telegram(
-                message
-            )
-
-            notifications += 1
+            cheaper_count += 1
 
             state[key] = new_price
 
 
-        # Если цена не изменилась —
-        # ничего не отправляем.
+        elif new_price > old_price:
 
-        # Если цена выросла —
-        # тоже ничего не отправляем.
+            # Обновляем состояние и при росте цены.
+            state[key] = new_price
 
 
-    # Сохраняем состояние
-    save_state(
-        state
+    # ========================================================
+    # СОХРАНЕНИЕ
+    # ========================================================
+
+    save_state(state)
+
+
+    # ========================================================
+    # ОТПРАВКА ОДНОГО ОТЧЁТА КАЖДЫЙ ЗАПУСК
+    # ========================================================
+
+    summary = build_run_summary(
+        all_results,
+        errors,
+        total_searches,
+        successful_searches,
+        new_count,
+        cheaper_count,
     )
 
+    send_telegram(summary)
 
-    print(
-        "Notifications sent:",
-        notifications
-    )
 
     print(
         "================================"
@@ -948,10 +812,38 @@ def main():
     )
 
     print(
+        f"Notifications: 1"
+    )
+
+    print(
         "================================"
     )
 
 
+# ============================================================
+# ЗАПУСК
+# ============================================================
+
 if __name__ == "__main__":
 
-    main()
+    try:
+
+        main()
+
+    except Exception as error:
+
+        print(
+            "FATAL ERROR:",
+            type(error).__name__,
+            str(error),
+        )
+
+        traceback.print_exc()
+
+        send_telegram(
+            "🚨 Maxim Flight Monitor\n\n"
+            "КРИТИЧЕСКАЯ ОШИБКА.\n\n"
+            f"{type(error).__name__}: {error}"
+        )
+
+        raise
